@@ -75,13 +75,15 @@ wrangler.jsonc     → tracked   （会提交，无敏感值）
 
 D1 数据库已创建：
 
+> ℹ️ 真实值不进仓库 —— 见本机 `wrangler.jsonc` 与 `DEPLOY.md`。
+
 | 项 | 值 |
 |---|---|
 | 名称 | `cf-teamspeed` |
-| database_id | `ea808fe4-74e0-43d6-89ce-b86cd3d768fb` |
+| database_id | `<见本机 wrangler.jsonc>` |
 | 区域 | WNAM |
 
-Account ID：`9370e7f7ba4b38a57ffe6d4ebc6acec4`
+Account ID：`<见本机 DEPLOY.md>`
 
 ---
 
@@ -92,11 +94,11 @@ Account ID：`9370e7f7ba4b38a57ffe6d4ebc6acec4`
 ```bash
 # 1. 登录 Cloudflare
 wrangler login
-wrangler whoami          # profile: sfu, futurvo@outlook.com
+wrangler whoami          # 确认账号正确
 
 # 2. 创建 D1 数据库
 wrangler d1 create cf-teamspeed
-# → database_id: ea808fe4-74e0-43d6-89ce-b86cd3d768fb
+# → 输出一段配置，把 database_id 填进本机 wrangler.jsonc
 
 # 3. 生成三个自定义密钥
 node -e "console.log(crypto.randomUUID())"   # GUEST_KEY

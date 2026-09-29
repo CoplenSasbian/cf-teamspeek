@@ -255,8 +255,16 @@ export class SfuSession {
   //  公共
   // ==========================================================
 
-  /** 等待 ICE 收集完成（或超时 2s，避免卡死卡） */
-  private waitForIceGathering(timeoutMs = 2000): Promise<void> {
+  /**
+   * 等待 ICE 收集完成。
+   *
+   * 超时 350ms：这不是「等多久放弃」，而是「候选齐没齐」的判断窗口。
+   * 本项目只有音频、单条 STUN（stun.cloudflare.com）、max-bundle ——
+   * 实测候选几十毫秒内就收集完，complete 事件几乎立刻触发；
+   * 350ms 还没 complete 只剩两种可能：host 候选已够用（sfu 会自己挑），
+   * 或者网络确实异常，反正再等 2s 也无济于事，不如把连接时间还给用户。
+   */
+  private waitForIceGathering(timeoutMs = 350): Promise<void> {
     if (this.pc.iceGatheringState === 'complete') return Promise.resolve();
 
     return new Promise((resolve) => {

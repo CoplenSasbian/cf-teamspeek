@@ -1,14 +1,86 @@
 import { Hono } from 'hono';
 import { zValidator } from '@hono/zod-validator';
+import { setCookie, deleteCookie } from 'hono/cookie';
+import { z } from 'zod';
 import { kickSchema, banSchema, auditQuerySchema } from '@shared/schema';
-import { requireAuth, requireAdmin } from '../middleware/auth';
-import { flushAuditToD1, flushUsageToD1, readUsageDaily, queryAudit, pruneAudit } from '../lib/db';
+import { ADMIN_SESSION_COOKIE, ADMIN_SESSION_TTL_HOURS } from '@shared/constants';
+import { requireAdminSession } from '../middleware/auth';
+import { signAdminSession } from '../lib/jwt';
+import { timingSafeEqual, sha256Hex } from '../lib/crypto';
+import { flushAuditToD1, flushUsageToD1, readUsageDaily, queryAudit, pruneAudit, deleteRoomFromD1 } from '../lib/db';
 import type { AppEnv } from '../env';
 
 const admin = new Hono<AppEnv>();
 
-admin.use('*', requireAuth);
-admin.use('*', requireAdmin);
+/** 后台登录用的 IP 哈希（与客户端登录同一套派生方式，但混入的是 admin secret） */
+async function adminIpHash(c: { env: AppEnv['Bindings']; req: { header: (n: string) => string | undefined } }) {
+  const ip = c.req.header('CF-Connecting-IP') ?? '';
+  return sha256Hex(`${ip}:${c.env.ADMIN_SESSION_SECRET}`);
+}
+
+// ------------------------------------------------------------
+//  后台登录 / 登出 —— 独立于客户端会话（不同 secret + 不同 cookie）
+// ------------------------------------------------------------
+const adminLoginSchema = z.object({ key: z.string().min(1, 'key 不能为空') });
+
+admin.post('/auth/login', zValidator('json', adminLoginSchema), async (c) => {
+  const { key } = c.req.valid('json');
+
+  // 登录失败限流沿用 AdminDO 的计数器（按 IP 哈希，独立 scope 不影响客户端登录计数）
+  const adminStub = c.env.ADMIN_DO.get(c.env.ADMIN_DO.idFromName('global'));
+  const ipHash = await adminIpHash(c);
+  const scope = `admin-login:${ipHash}`;
+
+  // 先查锁：被锁的 key 即使正确也拒绝
+  const lock = await adminStub.checkLock(scope);
+  if (lock.locked) {
+    return c.json(
+      { ok: false, error: `尝试过于频繁，请 ${Math.ceil(lock.retryAfterMs / 60000)} 分钟后再试`, code: 'RATE_LIMITED' },
+      429,
+    );
+  }
+
+  if (!timingSafeEqual(key, c.env.ADMIN_KEY)) {
+    await adminStub.recordFailure(scope);
+    await adminStub.pushAudit({
+      event: 'admin_login_fail',
+      role: 'admin',
+      ipHash,
+    });
+    return c.json({ ok: false, error: 'key 无效', code: 'INVALID_KEY' }, 401);
+  }
+
+  await adminStub.recordSuccess(scope);
+  await adminStub.pushAudit({
+    event: 'admin_login_ok',
+    role: 'admin',
+    ipHash,
+  });
+
+  const token = await signAdminSession('admin', c.env.ADMIN_SESSION_SECRET);
+  setCookie(c, ADMIN_SESSION_COOKIE, token, {
+    httpOnly: true,
+    sameSite: 'Strict',
+    secure: new URL(c.req.url).protocol === 'https:',
+    path: '/',
+    maxAge: ADMIN_SESSION_TTL_HOURS * 3600,
+  });
+
+  return c.json({ ok: true, data: { token, nickname: 'admin' } });
+});
+
+admin.post('/auth/logout', (c) => {
+  deleteCookie(c, ADMIN_SESSION_COOKIE, { path: '/' });
+  return c.json({ ok: true, data: { loggedOut: true } });
+});
+
+admin.get('/auth/me', requireAdminSession, (c) => {
+  const user = c.get('user');
+  return c.json({ ok: true, data: { nickname: user.nickname, role: user.role } });
+});
+
+// 以下全部走后台专用会话
+admin.use('*', requireAdminSession);
 
 /** 实时概览 */
 admin.get('/overview', async (c) => {
@@ -165,6 +237,24 @@ admin.post('/rooms/:id/close', async (c) => {
   return c.json({ ok: true, data: { closed: true } });
 });
 
+/** 彻底删除房间（管理员可删任意房间，含默认房间） */
+admin.delete('/rooms/:id', async (c) => {
+  const id = c.req.param('id') ?? '';
+
+  const stub = c.env.ROOM_DO.get(c.env.ROOM_DO.idFromName(id));
+  if (!(await stub.getSummary()).id) {
+    return c.json({ ok: false, error: '房间不存在', code: 'ROOM_NOT_FOUND' }, 404);
+  }
+
+  await stub.destroy('房间已被管理员删除');
+
+  const registry = c.env.REGISTRY_DO.get(c.env.REGISTRY_DO.idFromName('global'));
+  await registry.removeRoom(id);
+  await deleteRoomFromD1(c.env, id);
+
+  return c.json({ ok: true, data: { deleted: true, id } });
+});
+
 /** 轮换房间密钥 */
 admin.post('/rooms/:id/rotate-key', async (c) => {
   const id = c.req.param('id') ?? '';
@@ -181,13 +271,30 @@ admin.patch('/rooms/:id/limit', async (c) => {
     return c.json({ ok: false, error: '缺少 maxMembers', code: 'INVALID_BODY' }, 400);
   }
   const stub = c.env.ROOM_DO.get(c.env.ROOM_DO.idFromName(id));
-  await stub.init({
-    id,
-    name: (await stub.getSummary()).name,
-    ownerUid: null,
-    maxMembers: body.maxMembers,
-  });
-  return c.json({ ok: true, data: await stub.getSummary() });
+  const res = await stub.update({ maxMembers: body.maxMembers });
+  if (!res.ok) {
+    return c.json({ ok: false, error: '房间不存在', code: 'ROOM_NOT_FOUND' }, 404);
+  }
+  const registry = c.env.REGISTRY_DO.get(c.env.REGISTRY_DO.idFromName('global'));
+  await registry.upsertRoom(res.summary);
+  return c.json({ ok: true, data: res.summary });
+});
+
+/** 管理员：给任意房间改名（含默认房间，不受房主限制） */
+admin.patch('/rooms/:id', async (c) => {
+  const id = c.req.param('id') ?? '';
+  const body = (await c.req.json().catch(() => ({}))) as { name?: string };
+  if (typeof body.name !== 'string' || !body.name.trim()) {
+    return c.json({ ok: false, error: '缺少 name', code: 'INVALID_BODY' }, 400);
+  }
+  const stub = c.env.ROOM_DO.get(c.env.ROOM_DO.idFromName(id));
+  const res = await stub.update({ name: body.name.trim() });
+  if (!res.ok) {
+    return c.json({ ok: false, error: '房间不存在', code: 'ROOM_NOT_FOUND' }, 404);
+  }
+  const registry = c.env.REGISTRY_DO.get(c.env.REGISTRY_DO.idFromName('global'));
+  await registry.upsertRoom(res.summary);
+  return c.json({ ok: true, data: res.summary });
 });
 
 /** 封禁列表 */

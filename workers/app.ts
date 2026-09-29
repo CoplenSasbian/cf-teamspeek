@@ -5,6 +5,7 @@ import authRoutes from './routes/auth';
 import roomRoutes from './routes/rooms';
 import rtcRoutes from './routes/rtc';
 import adminRoutes from './routes/admin';
+import presenceRoutes from './routes/presence';
 import type { AppEnv, Env } from './env';
 import { flushAuditToD1, flushUsageToD1 } from './lib/db';
 import { createLoadContext } from './lib/context';
@@ -14,6 +15,7 @@ import { createLoadContext } from './lib/context';
 export { RoomDO } from './durable/RoomDO';
 export { RegistryDO } from './durable/RegistryDO';
 export { AdminDO } from './durable/AdminDO';
+export { PresenceDO } from './durable/PresenceDO';
 
 const app = new Hono<AppEnv>();
 
@@ -23,6 +25,7 @@ const app = new Hono<AppEnv>();
 app.route('/api/auth', authRoutes);
 app.route('/api/rooms', roomRoutes);
 app.route('/api/rtc', rtcRoutes);
+app.route('/api/presence', presenceRoutes);
 
 // 管理员后台 API 挂在可配置路径下
 app.route('/api/admin', adminRoutes);

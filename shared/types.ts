@@ -36,6 +36,11 @@ export interface RoomSummary {
   createdAt: number;
 }
 
+/** 房间列表项：概要 + 当前成员（侧栏用来在房间下展示人头） */
+export interface RoomWithMembers extends RoomSummary {
+  members: RoomMember[];
+}
+
 /** 房间内成员 */
 export interface RoomMember {
   uid: string;
@@ -56,6 +61,54 @@ export interface RoomSnapshot {
   room: RoomSummary;
   members: RoomMember[];
   version: number;
+}
+
+/**
+ * 服务器在线成员（Presence）
+ *
+ * 本应用没有独立的「服务器」实体：一个部署即一台服务器。
+ * 只要保持 presence 心跳，就算「连上了这台服务器」。
+ */
+/** 在线状态 */
+export type PresenceStatus = 'online' | 'busy' | 'away' | 'invisible' | 'offline';
+
+export interface PresenceUser {
+  uid: string;
+  nickname: string;
+  role: Role;
+  avatarId: string | null;
+  avatarUrl: string | null;
+  /** 是否保持活跃心跳（在线） */
+  online: boolean;
+  /** 展示状态：online 在线 / busy 忙碌 / away 离开 / invisible 隐身 */
+  status: PresenceStatus;
+  /** 是否允许被邀请进房间 */
+  invitable: boolean;
+  /** 当前所在房间（不在任何房间为 null） */
+  roomId: string | null;
+  roomName: string | null;
+  /** 最后一次心跳时间戳 */
+  lastSeen: number;
+}
+
+/** 邀请入频道（房间） */
+export interface PresenceInvite {
+  id: string;
+  fromUid: string;
+  fromNickname: string;
+  roomId: string;
+  roomName: string;
+  createdAt: number;
+}
+
+/** 服务器成员快照（POST /api/presence/poll） */
+export interface PresenceSnapshot {
+  online: PresenceUser[];
+  /** 已注册但当前未连接的用户；仅管理员可见 */
+  offline: PresenceUser[];
+  /** 本次轮询新收到的邀请（服务端已消费） */
+  invites: PresenceInvite[];
+  serverTime: number;
 }
 
 /** WebSocket 下行事件 */

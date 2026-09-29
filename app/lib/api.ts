@@ -107,9 +107,13 @@ export const authApi = {
 };
 
 export const roomsApi = {
-  list: () => api.get<{ rooms: import('@shared/types').RoomSummary[] }>('/api/rooms'),
+  list: () =>
+    api.get<{ rooms: import('@shared/types').RoomWithMembers[] }>('/api/rooms'),
   create: (body: { name: string; maxMembers?: number }) =>
     api.post<{ room: import('@shared/types').RoomSummary }>('/api/rooms', body),
+  update: (id: string, body: { name?: string; maxMembers?: number }) =>
+    api.patch<{ room: import('@shared/types').RoomSummary }>(`/api/rooms/${id}`, body),
+  remove: (id: string) => api.delete<{ deleted: boolean; id: string }>(`/api/rooms/${id}`),
   ensureDefault: () =>
     api.get<{ room: import('@shared/types').RoomSummary }>('/api/rooms/default'),
   snapshot: (id: string) =>
@@ -127,6 +131,29 @@ export const roomsApi = {
     api.post<{ version: number; reaped: number }>(`/api/rooms/${id}/heartbeat`, { roomId: id }),
   mute: (id: string, muted: boolean) =>
     api.post<{ muted: boolean }>(`/api/rooms/${id}/mute`, { muted }),
+};
+
+export const presenceApi = {
+  /** 心跳：登记在线状态与当前房间 */
+  heartbeat: (body: {
+    roomId?: string | null;
+    roomName?: string | null;
+    status?: import('@shared/types').PresenceStatus;
+    invitable?: boolean;
+  }) => api.post<{ alive: boolean }>('/api/presence/heartbeat', body),
+  /** 轮询：服务器成员快照 + 取走新邀请 */
+  poll: () => api.post<import('@shared/types').PresenceSnapshot>('/api/presence/poll', {}),
+  /** 主动下线（登出前调用） */
+  leave: () => api.post<{ dropped: boolean }>('/api/presence/leave', {}),
+  /** 邀请某人加入房间 */
+  invite: (body: { toUid: string; roomId: string }) =>
+    api.post<{ sent: boolean; reason?: string }>('/api/presence/invite', body),
+  /** 管理员：踢出服务器 */
+  kick: (body: { uid: string; reason?: string; durationMinutes?: number }) =>
+    api.post<{ kicked: boolean; banned: boolean; roomId: string | null }>(
+      '/api/presence/kick',
+      body,
+    ),
 };
 
 export const rtcApi = {
@@ -201,9 +228,12 @@ export const adminApi = {
   kick: (body: { roomId: string; uid: string; reason?: string }) =>
     api.post<{ ok: boolean }>('/api/admin/kick', body),
   closeRoom: (id: string) => api.post<{ closed: boolean }>(`/api/admin/rooms/${id}/close`),
+  deleteRoom: (id: string) => api.delete<{ deleted: boolean; id: string }>(`/api/admin/rooms/${id}`),
   rotateKey: (id: string) => api.post<{ keyId: string }>(`/api/admin/rooms/${id}/rotate-key`),
   setLimit: (id: string, maxMembers: number) =>
     api.patch<import('@shared/types').RoomSummary>(`/api/admin/rooms/${id}/limit`, { maxMembers }),
+  renameRoom: (id: string, name: string) =>
+    api.patch<import('@shared/types').RoomSummary>(`/api/admin/rooms/${id}`, { name }),
   bans: () =>
     api.get<{
       bans: Array<{

@@ -15,8 +15,15 @@ import { OverviewTab, type OverviewData } from '~/components/admin/OverviewTab';
 import { UsageTab } from '~/components/admin/UsageTab';
 import { AuditTab } from '~/components/admin/AuditTab';
 import { ManageTab } from '~/components/admin/ManageTab';
-import { adminApi, authApi, setBaseUrl } from '~/lib/api';
-import { loadSettings, resolveBaseUrl } from '~/lib/settings';
+import {
+  adminApi,
+  adminAuthApi,
+  setAdminBaseUrl,
+  signOutAdminLocally,
+  isAdminSignedIn,
+  AdminApiError,
+} from '~/lib/admin-api';
+import { resolveBaseUrl } from '~/lib/settings';
 import { cn } from '~/lib/utils';
 
 export function meta() {
@@ -37,32 +44,38 @@ export default function DevPage() {
 
   const [tab, setTab] = useState<TabId>('overview');
   const [authorized, setAuthorized] = useState<boolean | null>(null);
-  const [profile, setProfile] = useState<{ nickname: string } | null>(null);
+  const [nickname, setNickname] = useState<string | null>(null);
   const [overview, setOverview] = useState<OverviewData | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [tick, setTick] = useState(0);
 
-  // ---- 鉴权 ----
+  // ---- 鉴权：校验后台专用会话（ct_admin_session / 后台 JWT） ----
   useEffect(() => {
-    const s = loadSettings();
-    setBaseUrl(s.baseUrl || resolveBaseUrl());
+    setAdminBaseUrl(resolveBaseUrl());
 
     void (async () => {
-      try {
-        const { profile: me } = await authApi.me();
-        if (me.role !== 'admin') {
-          setAuthorized(false);
-          setError('需要管理员权限');
-          return;
-        }
-        setProfile(me);
-        setAuthorized(true);
-      } catch {
+      // 本地连 token 都没有，直接去登录页，省一次请求
+      if (!isAdminSignedIn()) {
         setAuthorized(false);
-        setError('请先以管理员身份登录');
+        navigate('/admin/login', { replace: true });
+        return;
+      }
+      try {
+        const me = await adminAuthApi.me();
+        setNickname(me.nickname);
+        setAuthorized(true);
+      } catch (err) {
+        signOutAdminLocally();
+        setAuthorized(false);
+        // token 失效（而不是网络错误）才跳登录页
+        if (err instanceof AdminApiError && err.status === 401) {
+          navigate('/admin/login', { replace: true });
+        } else {
+          setError('无法连接服务器');
+        }
       }
     })();
-  }, []);
+  }, [navigate]);
 
   // ---- 拉取概览 ----
   const refreshOverview = useCallback(async () => {
@@ -70,9 +83,14 @@ export default function DevPage() {
       const data = await adminApi.overview();
       setOverview(data);
     } catch (err) {
+      if (err instanceof AdminApiError && err.status === 401) {
+        signOutAdminLocally();
+        navigate('/admin/login', { replace: true });
+        return;
+      }
       setError(err instanceof Error ? err.message : '加载失败');
     }
-  }, []);
+  }, [navigate]);
 
   useEffect(() => {
     if (!authorized) return;
@@ -84,8 +102,9 @@ export default function DevPage() {
   }, [authorized, tab, refreshOverview, tick]);
 
   async function logout() {
-    await authApi.logout().catch(() => undefined);
-    navigate('/', { replace: true });
+    await adminAuthApi.logout().catch(() => undefined);
+    signOutAdminLocally();
+    navigate('/admin/login', { replace: true });
   }
 
   if (authorized === null) {
@@ -103,19 +122,19 @@ export default function DevPage() {
           <AlertTriangle className="h-6 w-6" />
         </div>
         <h1 className="text-lg font-semibold text-ink">无法访问后台</h1>
-        <p className="text-sm text-ink-3">{error}</p>
+        <p className="text-sm text-ink-3">{error ?? '需要管理员登录'}</p>
         <button
-          onClick={() => navigate('/', { replace: true })}
+          onClick={() => navigate('/admin/login', { replace: true })}
           className="rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent-hover"
         >
-          返回登录
+          去登录
         </button>
       </main>
     );
   }
 
   return (
-    <main className="mx-auto flex min-h-screen w-full max-w-4xl flex-col gap-5 px-5 py-8">
+    <main className="mx-auto flex min-h-screen w-full max-w-6xl flex-col gap-5 px-5 py-8">
       {/* 头部 */}
       <header className="flex items-center gap-3">
         <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-ink text-white shadow-sm">
@@ -124,7 +143,7 @@ export default function DevPage() {
         <div className="flex-1">
           <h1 className="text-lg font-semibold tracking-tight text-ink">管理后台</h1>
           <p className="text-xs text-ink-3">
-            {profile?.nickname} · 每 5 秒刷新概览
+            {nickname ?? 'admin'} · 后台独立会话 · 每 5 秒刷新概览
           </p>
         </div>
         <button

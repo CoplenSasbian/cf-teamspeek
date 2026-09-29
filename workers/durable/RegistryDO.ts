@@ -283,6 +283,10 @@ export class RegistryDO extends DurableObject<Env> {
   // ==========================================================
 
   async upsertRoom(room: RoomSummary): Promise<void> {
+    // 防御：房间被删除后 getSummary() 会返回空 id（元信息已清空）。
+    // 若不拦住，/leave 之类的收尾请求会把一条 id='' 的幽灵记录写进目录。
+    if (!room.id) return;
+
     this.sql.exec(
       `INSERT INTO rooms (id, name, owner_uid, member_count, max_members, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -316,7 +320,7 @@ export class RegistryDO extends DurableObject<Env> {
         created_at: number;
       }>(
         `SELECT id, name, owner_uid, member_count, max_members, created_at
-         FROM rooms ORDER BY created_at DESC`,
+         FROM rooms WHERE id != '' ORDER BY created_at DESC`,
       )
       .toArray();
     return rows.map((r) => ({

@@ -175,15 +175,20 @@
 
 **关键点：Worker 永远不碰音频流。** 音频走客户端到 SFU 的直连，Worker 只负责信令交换和房间业务。这既降低了 CPU 开销，也大幅减少了流量费用。
 
-### 三个 Durable Object 类
+### 四个 Durable Object 类
 
 | 类名 | 实例粒度 | 职责 |
 |---|---|---|
 | `RoomDO` | 每房间一个 | 成员进出、昵称占用、track 发现、心跳、资源回收、WebSocket 广播 |
 | `RegistryDO` | 全局单例 | 全局昵称注册表（保证唯一）、会话流水缓冲、用量计数聚合 |
-| `AdminDO` | 全局单例 | 封禁名单缓存、后台实时统计缓存 |
+| `AdminDO` | 全局单例 | 封禁名单缓存、后台实时统计缓存、审计缓冲 |
+| `PresenceDO` | 全局单例 | 服务器在线名册（谁连上了这台服务器、在哪个房间）、邀请信箱 |
 
 > 用单例 DO 做缓冲是关键设计：把大量小写入在内存里累加，按时间窗口一次性 flush 到 D1，避免击穿 D1 每天 10 万行的写入额度。
+
+> `PresenceDO` 承担「网关」角色：本应用没有独立的服务器实体，**一个部署就是一台服务器**。
+> 客户端在外壳层以 15s 心跳登记在线、以 6s 轮询拉取成员列表与邀请；
+> 用轮询而非常驻 WebSocket，是为了不给每个用户维持一条长连接（房间内的实时同步仍走 `RoomDO` 的 WebSocket）。
 
 ---
 
@@ -307,11 +312,13 @@ Cloudflare 提供两套 Realtime 方案，必须明确区分：
 | 房间路由 | `server/routes/rooms.ts` | 房间列表、创建、销毁、房间内操作 |
 | RTC 路由 | `server/routes/rtc.ts` | 包装 SFU API（`sessions/new`、`tracks/new`、`renegotiate`、`tracks/close`） |
 | 后台路由 | `server/routes/admin.ts` | 概览、用量、审计、管理操作 |
+| 在线状态路由 | `server/routes/presence.ts` | 服务器成员心跳 / 轮询、邀请入频道、管理员踢出服务器 |
 | SFU 客户端 | `server/lib/sfu.ts` | 调用 `rtc.live.cloudflare.com/v1` 的封装，统一错误处理 |
 | 用量聚合 | `server/lib/usage.ts` | 内存累加 + 定时 flush 到 D1 |
 | RoomDO | `server/durable/RoomDO.ts` | 房间状态与生命周期 |
 | RegistryDO | `server/durable/RegistryDO.ts` | 昵称注册表、写入缓冲 |
 | AdminDO | `server/durable/AdminDO.ts` | 封禁名单、统计缓存 |
+| PresenceDO | `server/durable/PresenceDO.ts` | 在线名册、邀请信箱 |
 
 ### 7.2 客户端（`app/`）
 
@@ -319,13 +326,18 @@ Cloudflare 提供两套 Realtime 方案，必须明确区分：
 |---|---|---|
 | 路由定义 | `app/routes.ts` | React Router 路由表 |
 | 根布局 | `app/root.tsx` | HTML 骨架、Tailwind 注入、错误边界 |
-| 大厅页 | `app/routes/lobby.tsx` | baseUrl/key/昵称/头像 输入，本地持久化 |
-| 语音页 | `app/routes/room.$id.tsx` | 成员列表、麦克风控制、连接状态 |
+| 登录页 | `app/routes/login.tsx` | baseUrl/key/昵称/头像 输入，本地持久化 |
+| 应用外壳 | `app/routes/app-shell.tsx` | **三栏布局**：房间列表 / 房间内容 / 服务器成员；持有会话、房间列表、在线状态 |
+| 房间总览 | `app/routes/welcome.tsx` | 未选房间时的中间栏（房间卡片） |
+| 房间页 | `app/routes/room.tsx` | 中间栏：成员网格、麦克风控制、连接状态 |
 | 开发者页 | `app/routes/dev.tsx` | 管理员后台（概览/用量/审计/管理 四个 Tab） |
 | 房间控制器 | `app/lib/room-controller.ts` | **核心**：管理 PeerConnection 生命周期、SDP 队列、重连 |
 | SFU 会话 | `app/lib/sfu-session.ts` | 发布/订阅 PeerConnection 的封装 |
+| 在线状态 | `app/lib/use-presence.ts` | 服务器心跳 + 成员轮询 + 邀请收取 |
 | 头像组件 | `app/components/Avatar.tsx` | 渲染预设/上传/默认头像 |
 | 音频指示 | `app/components/VolumeMeter.tsx` | Web Audio API 实时音量条 |
+| 房间侧栏 | `app/components/Sidebar.tsx` | 房间列表 + 房间内成员 + 自己的账号卡片 |
+| 成员侧栏 | `app/components/MemberRail.tsx` | 在线/离线成员、邀请入频道、踢出服务器 |
 | 设置存储 | `app/lib/settings.ts` | baseUrl/key/昵称 的 localStorage 持久化 |
 
 ### 7.3 共享（`shared/`）
@@ -500,12 +512,47 @@ Cloudflare 提供两套 Realtime 方案，必须明确区分：
 
 ## 10. 客户端形态
 
-### 10.1 浏览器直开
+### 10.1 三栏布局（KOOK 式）
+
+桌面端为固定三栏，窄屏下两侧栏收起为抽屉、中间栏占满：
+
+```
+┌──────────────┬───────────────────────────┬───────────────┐
+│ 房间列表       │ 房间内容                   │ 服务器成员      │
+│ 248px         │ flex-1                    │ 240px         │
+│               │                           │               │
+│ 服务器名        │ 房间标题 + 人数/时长/连接状态  │ 在线 — n       │
+│ 房间 A  2/10  │                           │  [头像] 昵称    │
+│   ├ [头像] 甲  │  ┌─────────────────────┐  │  [头像] 昵称    │
+│   └ [头像] 乙  │  │  成员网格（大头像）    │  │ 离线 — n       │
+│ 房间 B  0/10  │  └─────────────────────┘  │  [头像] 昵称    │
+│ + 新建房间     │  [ 静音 · 状态 · 离开 ]     │               │
+│ [自己账号卡片]  │                           │               │
+└──────────────┴───────────────────────────┴───────────────┘
+```
+
+各栏对应关系与设计取舍：
+
+| 栏位 | 对应 KOOK | 本项目实现 |
+|---|---|---|
+| 服务器竖排图标 | 第一列 | **省略** —— Web 端一个部署就是一台服务器，没有多服务器概念 |
+| 频道列表 | 第二列 | 房间列表；进入房间后，房间下方直接铺开房里的人（与 KOOK 语音频道下挂成员一致） |
+| 频道内容 | 第三列 | 房间内容（语音房间：成员网格 + 底部控制条） |
+| 服务器成员 | 第四列 | 连上这台服务器的人：在线 / 离线分组，可邀请入频道；管理员可踢出服务器 |
+
+交互要点：
+
+- **在线**＝保持 presence 心跳的人（不论是否在房间）；**离线**＝已注册但当前没连接的人（离线名册只对管理员返回）。
+- **邀请入频道**：把自己所在房间的房间号投递到对方信箱，对方右下角弹出邀请卡片，接受即进入。
+- **踢出服务器**：管理员操作，立即断开对方连接并封禁其昵称（可在后台封禁名单解除）。
+- 未进入任何房间时，中间栏展示房间总览卡片（`welcome.tsx`）。
+
+### 10.2 浏览器直开
 
 - 访问 Worker 域名 → 若曾登录过（Cookie 有效）直接进大厅；否则显示登录页。
 - baseUrl 默认为 `window.location.origin`，用户无需填写。
 
-### 10.2 WebView 套壳 App
+### 10.3 WebView 套壳 App
 
 套壳极简，只需：
 
@@ -526,7 +573,7 @@ window.__CF_VOICE_BASE_URL__ = 'https://your-worker.workers.dev';
 
 > **WebView 兼容性注意**：Android WebView 需 `setMediaPlaybackRequiresUserGesture(false)` 才能自动播放远端音频；iOS `WKWebView` 需在 Info.plist 声明麦克风权限并处理 `WKUIDelegate` 的权限请求。
 
-### 10.3 本地配置持久化
+### 10.4 本地配置持久化
 
 | 键 | 存储位置 | 说明 |
 |---|---|---|

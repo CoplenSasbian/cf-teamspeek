@@ -1,12 +1,18 @@
 {
   // ============================================================
-  //  cf-teamspeed — Cloudflare Workers 配置
+  //  cf-teamspeed — Cloudflare Workers 配置【模板】
   // ============================================================
-  //  需要你填写的只有一处：D1 的 database_id（见下方 d1_databases）
-  //  获取方式：wrangler d1 create cf-teamspeed
+  //  用法：复制本文件为 wrangler.jsonc，再把下面三处占位符换成真实值。
   //
-  //  本文件【可以】提交到 git（database_id 不是敏感值）
-  //  所有密钥请放 .dev.vars，不要写在这里
+  //  ⚠️ 为什么不直接提交 wrangler.jsonc：
+  //     它含账号相关的事实（域名、D1 database_id、Turnstile site key）。
+  //     虽然不是密钥（拿到也无法访问数据），但属于部署环境信息，
+  //     留在本机、不随仓库分发。见 .gitignore。
+  //
+  //  需要替换的占位符（共 3 处，都在下面标了 👉）：
+  //    1. routes[].pattern            —— 你的自定义域名
+  //    2. d1_databases[].database_id  —— wrangler d1 create 的输出
+  //    3. vars.TURNSTILE_SITE_KEY     —— Turnstile widget 的 Site Key
   // ============================================================
 
   "$schema": "./node_modules/wrangler/config-schema.json",
@@ -24,6 +30,17 @@
   },
 
   // ------------------------------------------------------------
+  // 自定义域
+  // 👉 换成你的域名；不需要自定义域就整个删掉这一节（用 workers.dev）
+  // ------------------------------------------------------------
+  "routes": [
+    {
+      "pattern": "voice.example.com",
+      "custom_domain": true
+    }
+  ],
+
+  // ------------------------------------------------------------
   // 定时任务：把 DO 内存缓冲批量落库到 D1
   // 每 10 分钟一次 → 每天 144 次触发，D1 写入行数完全可控
   // ------------------------------------------------------------
@@ -39,7 +56,8 @@
     "bindings": [
       { "name": "ROOM_DO", "class_name": "RoomDO" },
       { "name": "REGISTRY_DO", "class_name": "RegistryDO" },
-      { "name": "ADMIN_DO", "class_name": "AdminDO" }
+      { "name": "ADMIN_DO", "class_name": "AdminDO" },
+      { "name": "PRESENCE_DO", "class_name": "PresenceDO" }
     ]
   },
 
@@ -47,23 +65,22 @@
     {
       "tag": "v1",
       "new_sqlite_classes": ["RoomDO", "RegistryDO", "AdminDO"]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": ["PresenceDO"]
     }
   ],
 
   // ------------------------------------------------------------
   // D1 数据库
-  // ⚠️ 需要你填写：把下面的 database_id 换成真实值
-  //
-  //    获取方法：
-  //      wrangler d1 create cf-teamspeed
-  //
-  //    命令会输出一段配置，复制其中的 database_id 填到下面
+  // 👉 database_id 换成真实的（wrangler d1 create cf-teamspeed 的输出）
   // ------------------------------------------------------------
   "d1_databases": [
     {
       "binding": "DB",
       "database_name": "cf-teamspeed",
-      "database_id": "ea808fe4-74e0-43d6-89ce-b86cd3d768fb"
+      "database_id": "00000000-0000-0000-0000-000000000000"
     }
   ],
 
@@ -72,17 +89,10 @@
   // 密钥（App Secret / 各种 KEY）一律不写在这里，放 .dev.vars
   // ------------------------------------------------------------
   "vars": {
-    // Turnstile Site Key —— 这个是公开值，可以进 git
-    //
-    // 开发阶段：用官方测试 key（总是通过），连 widget 都不用建
-    //           1x00000000000000000000AA
-    //           对应 .dev.vars 的 TURNSTILE_SECRET_KEY 填
-    //           1x0000000000000000000000000000000AA
-    //
-    // 部署前：换成真实 widget 的 sitekey
-    //   获取：https://dash.cloudflare.com/?to=%2F%3Aaccount%2Fturnstile
-    //   创建 widget 时 Hostname 填你的域名（白名单，非所有权声明）
-    //   随时可改，不阻塞开发
+    // 👉 Turnstile Site Key
+    //    生产：Dashboard → Turnstile → 建 widget（Hostname 填你的域名）
+    //    本地开发：可用官方测试 key 1x00000000000000000000AA（总是通过）
+    //    对应的 TURNSTILE_SECRET_KEY 走 wrangler secret，不写在这里
     "TURNSTILE_SITE_KEY": "1x00000000000000000000AA",
 
     // 管理员后台路径

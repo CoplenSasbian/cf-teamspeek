@@ -1,6 +1,7 @@
 import type { RoomDO } from './durable/RoomDO';
 import type { RegistryDO } from './durable/RegistryDO';
 import type { AdminDO } from './durable/AdminDO';
+import type { PresenceDO } from './durable/PresenceDO';
 
 /**
  * Worker 环境绑定（与 wrangler.jsonc 的 bindings / vars 一一对应）。
@@ -15,6 +16,8 @@ export interface Env {
   GUEST_KEY: string;
   ADMIN_KEY: string;
   SESSION_SECRET: string;
+  /** 管理后台专用签名密钥（与客户端 SESSION_SECRET 完全独立） */
+  ADMIN_SESSION_SECRET: string;
   TURNSTILE_SECRET_KEY: string;
 
   // ---- Vars（wrangler.jsonc vars） ----
@@ -33,6 +36,7 @@ export interface Env {
   ROOM_DO: DurableObjectNamespace<RoomDO>;
   REGISTRY_DO: DurableObjectNamespace<RegistryDO>;
   ADMIN_DO: DurableObjectNamespace<AdminDO>;
+  PRESENCE_DO: DurableObjectNamespace<PresenceDO>;
 }
 
 /** Hono 上下文变量 */

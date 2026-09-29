@@ -57,6 +57,17 @@ export const createRoomSchema = z.object({
 });
 export type CreateRoomInput = z.infer<typeof createRoomSchema>;
 
+/** 修改房间（改名 / 调人数上限）；至少给一个字段 */
+export const updateRoomSchema = z
+  .object({
+    name: z.string().trim().min(1, '房间名不能为空').max(24, '房间名最多 24 个字符').optional(),
+    maxMembers: z.number().int().min(2, '人数上限至少 2 人').max(50, '人数上限最多 50 人').optional(),
+  })
+  .refine((v) => v.name !== undefined || v.maxMembers !== undefined, {
+    message: '没有要修改的内容',
+  });
+export type UpdateRoomInput = z.infer<typeof updateRoomSchema>;
+
 /** SFU 发布请求 */
 export const publishSchema = z.object({
   sdp: z.string().min(1),
@@ -135,6 +146,34 @@ export const kickSchema = z.object({
   reason: z.string().max(100).optional(),
 });
 export type KickInput = z.infer<typeof kickSchema>;
+
+/** 服务器在线状态：心跳 */
+export const presenceHeartbeatSchema = z.object({
+  /** 当前所在房间（不在房间传 null / 省略） */
+  roomId: z.string().max(64).nullable().optional(),
+  roomName: z.string().max(64).nullable().optional(),
+  /** 在线状态：online 在线 / busy 忙碌 / away 离开 / invisible 隐身 */
+  status: z.enum(['online', 'busy', 'away', 'invisible']).optional(),
+  /** 是否允许被邀请进房间（false 时别人发邀请会被拒） */
+  invitable: z.boolean().optional(),
+});
+export type PresenceHeartbeatInput = z.infer<typeof presenceHeartbeatSchema>;
+
+/** 邀请入频道 */
+export const inviteSchema = z.object({
+  toUid: z.string().min(1),
+  roomId: z.string().min(1),
+});
+export type InviteInput = z.infer<typeof inviteSchema>;
+
+/** 管理员：踢出服务器（断开连接 + 封禁昵称） */
+export const serverKickSchema = z.object({
+  uid: z.string().min(1),
+  reason: z.string().max(100).optional(),
+  /** 封禁时长（分钟），不填为永久 */
+  durationMinutes: z.number().int().positive().optional(),
+});
+export type ServerKickInput = z.infer<typeof serverKickSchema>;
 
 /** 管理员：封禁 */
 export const banSchema = z.object({

@@ -28,6 +28,14 @@ config.local.yml
 # Cloudflare 账户级 API Token（仅用量看板可选功能使用）
 .secrets/
 
+# 部署实录（含账号 ID / D1 ID / 资源名等环境事实，只在本机留存，手动同步到其它电脑）
+DEPLOY.md
+DEPLOY.local.md
+
+# 实际使用的 Wrangler 配置（含域名 / D1 database_id / Turnstile Site Key）
+# 仓库里只提交 wrangler.example.jsonc 模板，复制改名后填真实值
+wrangler.jsonc
+
 # ============================================================
 # Wrangler
 # ============================================================

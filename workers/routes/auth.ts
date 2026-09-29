@@ -78,6 +78,12 @@ auth.post('/login', loginRateLimit, zValidator('json', loginSchema), async (c) =
     }
   }
 
+  // --- 2.5 封禁校验（被踢出服务器的昵称 / IP 不允许再进入） ---
+  const banStub = c.env.ADMIN_DO.get(c.env.ADMIN_DO.idFromName('global'));
+  if (await banStub.isBanned({ ipHash, nickname })) {
+    return c.json({ ok: false, error: '你已被移出本服务器', code: 'BANNED' }, 403);
+  }
+
   // --- 3. 昵称注册 / 复用 ---
   const registry = c.env.REGISTRY_DO.get(c.env.REGISTRY_DO.idFromName('global'));
 
@@ -202,6 +208,32 @@ auth.patch('/me', requireAuth, zValidator('json', updateProfileSchema), async (c
     path: '/',
     maxAge: SESSION_TTL_HOURS * 3600,
   });
+
+  // 资料是元数据：uid 才是身份主键，改名/换头像不等于换人。
+  // 因此这里把新资料原地同步到在线名册和该用户当前所在的房间，
+  // 而不是让他「退出再进入」——房间里的其他人也会立刻看到新昵称。
+  try {
+    const presence = c.env.PRESENCE_DO.get(c.env.PRESENCE_DO.idFromName('global'));
+    const { roomId } = await presence.refreshProfile({
+      uid: profile.uid,
+      nickname: profile.nickname,
+      avatarId: profile.avatarId,
+      avatarUrl: profile.avatarUrl,
+    });
+
+    if (roomId) {
+      const roomStub = c.env.ROOM_DO.get(c.env.ROOM_DO.idFromName(roomId));
+      await roomStub.updateMemberProfile({
+        uid: profile.uid,
+        nickname: profile.nickname,
+        avatarId: profile.avatarId,
+        avatarUrl: profile.avatarUrl,
+      });
+    }
+  } catch (err) {
+    // 同步失败不影响资料本身已保存，客户端下次心跳会自我纠正
+    console.error('[auth] 资料同步到房间/名册失败', err);
+  }
 
   return c.json({ ok: true, data: { profile, token } });
 });

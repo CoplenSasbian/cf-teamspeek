@@ -32,7 +32,10 @@ const THEME_BOOTSTRAP = `(function(){try{var m=window.matchMedia('(prefers-color
 
 export function Layout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="zh-CN">
+    // suppressHydrationWarning：首帧主题脚本会在 React 水合前给 <html> 打上
+    // .dark/.light 与 color-scheme，属性必然与 SSR 输出不同。
+    // 这正是该属性设计的用途（只作用于本元素自身的属性，不影响子树）。
+    <html lang="zh-CN" suppressHydrationWarning>
       <head>
         <meta charSet="utf-8" />
         <Meta />

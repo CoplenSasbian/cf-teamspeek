@@ -1,5 +1,19 @@
 import type { Env } from '../env';
 
+/**
+ * D1 在本项目里只承担「旁路」职责：审计流水、用量聚合、房间目录镜像。
+ * 权威数据始终在 Durable Object 里，所以这些写入一律降级为 best-effort——
+ * 本地还没跑过 `wrangler d1 migrations apply --local`（表不存在）、
+ * 或 D1 临时抖动，都不该把「创建房间 / 进入房间」这类主流程带崩。
+ */
+async function bestEffort(label: string, run: () => Promise<unknown>): Promise<void> {
+  try {
+    await run();
+  } catch (err) {
+    console.error(`[d1] ${label} 写入失败（已忽略，不影响主流程）`, err);
+  }
+}
+
 /** 把 AdminDO 的审计缓冲批量搬进 D1 */
 export async function flushAuditToD1(env: Env, limit = 500): Promise<number> {
   const stub = env.ADMIN_DO.get(env.ADMIN_DO.idFromName('global'));
@@ -12,8 +26,13 @@ export async function flushAuditToD1(env: Env, limit = 500): Promise<number> {
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
 
-  const batch = rows.map((r) =>
-    stmt.bind(
+  // D1 单条语句绑定上限是 100 个变量：每行 12 个 → 每批最多 8 行。
+  // 超限会直接 SQLITE_ERROR「too many SQL variables」，审计页整个 500。
+  const BATCH = 8;
+  let written = 0;
+  for (let i = 0; i < rows.length; i += BATCH) {
+    const chunk = rows.slice(i, i + BATCH);
+    await env.DB.batch(chunk.map((r) => stmt.bind(
       r.id,
       r.uid,
       r.nickname,
@@ -26,11 +45,10 @@ export async function flushAuditToD1(env: Env, limit = 500): Promise<number> {
       r.city,
       r.userAgent,
       r.createdAt,
-    ),
-  );
-
-  await env.DB.batch(batch);
-  return rows.length;
+    )));
+    written += chunk.length;
+  }
+  return written;
 }
 
 /** 把 RegistryDO 的用量缓冲批量写进 usage_daily */
@@ -56,13 +74,22 @@ export async function upsertRoomToD1(
   env: Env,
   room: { id: string; name: string; ownerUid: string | null; maxMembers: number; createdAt: number },
 ): Promise<void> {
-  await env.DB.prepare(
-    `INSERT INTO rooms (id, name, owner_uid, max_members, created_at, peak_members)
-     VALUES (?, ?, ?, ?, ?, 0)
-     ON CONFLICT(id) DO UPDATE SET name = excluded.name, max_members = excluded.max_members`,
-  )
-    .bind(room.id, room.name, room.ownerUid, room.maxMembers, room.createdAt)
-    .run();
+  await bestEffort('upsertRoomToD1', () =>
+    env.DB.prepare(
+      `INSERT INTO rooms (id, name, owner_uid, max_members, created_at, peak_members)
+       VALUES (?, ?, ?, ?, ?, 0)
+       ON CONFLICT(id) DO UPDATE SET name = excluded.name, max_members = excluded.max_members`,
+    )
+      .bind(room.id, room.name, room.ownerUid, room.maxMembers, room.createdAt)
+      .run(),
+  );
+}
+
+/** 删除房间记录（best-effort：D1 只是镜像，权威在 DO 侧） */
+export async function deleteRoomFromD1(env: Env, roomId: string): Promise<void> {
+  await bestEffort('deleteRoomFromD1', () =>
+    env.DB.prepare(`DELETE FROM rooms WHERE id = ?`).bind(roomId).run(),
+  );
 }
 
 /** 更新房间峰值人数与关闭时间 */
@@ -71,11 +98,13 @@ export async function touchRoomPeak(
   roomId: string,
   memberCount: number,
 ): Promise<void> {
-  await env.DB.prepare(
-    `UPDATE rooms SET peak_members = MAX(peak_members, ?) WHERE id = ?`,
-  )
-    .bind(memberCount, roomId)
-    .run();
+  await bestEffort('touchRoomPeak', () =>
+    env.DB.prepare(
+      `UPDATE rooms SET peak_members = MAX(peak_members, ?) WHERE id = ?`,
+    )
+      .bind(memberCount, roomId)
+      .run(),
+  );
 }
 
 /** 读取近 N 天的用量聚合 */

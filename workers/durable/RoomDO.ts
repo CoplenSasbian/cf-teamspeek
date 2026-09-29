@@ -89,14 +89,19 @@ export class RoomDO extends DurableObject<Env> {
     );
   }
 
-  /** 初始化房间（首次进房时由 Worker 调用） */
+  /**
+   * 初始化房间（首次创建时由 Worker 调用）。
+   *
+   * ⚠️ 只在【首次创建】时写入元信息。已存在的房间一律不动 —— 因为
+   * `/join` 路径传进来的 name 是占位符 `房间 ${id}`，如果在这里覆盖，
+   * 用户自己起的房间名会在**每次进房时被冲掉**（表现为房间名莫名其妙
+   * 变成「房间 + 随机 id」）。
+   *
+   * 改名 / 调上限走 `update()`，语义明确、只写指定字段。
+   */
   async init(input: { id: string; name: string; ownerUid: string | null; maxMembers: number }): Promise<void> {
-    if (this.getMeta('id')) {
-      // 已存在，仅更新名字与上限
-      this.setMeta('name', input.name);
-      this.setMeta('max_members', String(input.maxMembers));
-      return;
-    }
+    if (this.getMeta('id')) return; // 已存在：保持现有名字 / 房主 / 上限
+
     this.setMeta('id', input.id);
     this.setMeta('name', input.name);
     this.setMeta('owner_uid', input.ownerUid ?? '');
@@ -104,6 +109,27 @@ export class RoomDO extends DurableObject<Env> {
     this.setMeta('created_at', String(Date.now()));
     this.setMeta('version', '0');
     this.setMeta('key_id', crypto.randomUUID());
+  }
+
+  /**
+   * 局部更新房间元信息（改名 / 调人数上限）。
+   * 只写传入的字段，避免像 init() 那样顺手覆盖 owner / 上限。
+   */
+  async update(input: {
+    name?: string;
+    maxMembers?: number;
+  }): Promise<{ ok: boolean; code?: 'ROOM_NOT_FOUND'; summary: RoomSummary }> {
+    if (!this.getMeta('id')) {
+      return { ok: false, code: 'ROOM_NOT_FOUND', summary: await this.getSummary() };
+    }
+
+    if (input.name !== undefined) this.setMeta('name', input.name);
+    if (input.maxMembers !== undefined) this.setMeta('max_members', String(input.maxMembers));
+
+    const version = this.bumpVersion();
+    this.broadcast({ type: 'room-changed', version });
+
+    return { ok: true, summary: await this.getSummary() };
   }
 
   private bumpVersion(): number {
@@ -212,6 +238,36 @@ export class RoomDO extends DurableObject<Env> {
   }
 
   /**
+   * 资料变更（改昵称 / 换头像）——原地更新成员行。
+   *
+   * 身份主键是 uid，昵称与头像只是元数据。所以改名不应该等价于「退出再进入」：
+   * 这里只更新展示字段并广播一次 room-changed，成员关系、track、心跳都不受影响。
+   */
+  async updateMemberProfile(input: {
+    uid: string;
+    nickname: string;
+    avatarId: string | null;
+    avatarUrl: string | null;
+  }): Promise<{ updated: boolean }> {
+    const exists = this.sql
+      .exec<{ uid: string }>('SELECT uid FROM members WHERE uid = ?', input.uid)
+      .toArray();
+    if (exists.length === 0) return { updated: false };
+
+    this.sql.exec(
+      'UPDATE members SET nickname = ?, avatar_id = ?, avatar_url = ? WHERE uid = ?',
+      input.nickname,
+      input.avatarId,
+      input.avatarUrl,
+      input.uid,
+    );
+
+    const version = this.bumpVersion();
+    this.broadcast({ type: 'room-changed', version });
+    return { updated: true };
+  }
+
+  /**
    * 惰性清理超时成员。
    * 没有 setInterval，所以每次交互时顺带扫一遍。
    */
@@ -267,6 +323,30 @@ export class RoomDO extends DurableObject<Env> {
     this.bumpVersion();
   }
 
+  /**
+   * 彻底删除房间：广播 room-closed、断开所有连接、清空成员/轨道/元信息。
+   * 与 close() 的区别：close() 只清人（房间还在，可再次加入）；
+   * destroy() 连元信息一起删掉，之后 getSummary().id 为空 —— 即「房间不存在」。
+   */
+  async destroy(reason: string): Promise<{ destroyed: boolean; disconnected: number }> {
+    this.broadcast({ type: 'room-closed', reason } as RoomEvent);
+
+    const sockets = this.ctx.getWebSockets();
+    for (const ws of sockets) {
+      try {
+        ws.close(1000, 'room deleted');
+      } catch {
+        /* ignore */
+      }
+    }
+
+    this.sql.exec('DELETE FROM tracks');
+    this.sql.exec('DELETE FROM members');
+    this.sql.exec('DELETE FROM meta');
+
+    return { destroyed: true, disconnected: sockets.length };
+  }
+
   /** 轮换房间密钥 */
   async rotateKey(): Promise<{ keyId: string }> {
     const keyId = crypto.randomUUID();
@@ -303,10 +383,18 @@ export class RoomDO extends DurableObject<Env> {
       input.mid ?? null,
       Date.now(),
     );
+
+    // 必须广播：订阅方是「先查轨道表、再决定订阅」的。
+    // 若只靠成员进出事件唤醒，先加入的人会在对方还没发布完时查一次空表，
+    // 之后再无通知 —— 于是永远订阅不上后加入的人（表现为听不到对方）。
+    const version = this.bumpVersion();
+    this.broadcast({ type: 'room-changed', version });
   }
 
   async unregisterTrack(trackName: string): Promise<void> {
     this.sql.exec('DELETE FROM tracks WHERE track_name = ?', trackName);
+    const version = this.bumpVersion();
+    this.broadcast({ type: 'room-changed', version });
   }
 
   /** 按 trackName 查 mid（关闭轨道时必须用 mid） */

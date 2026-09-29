@@ -309,10 +309,16 @@ export class AdminDO extends DurableObject<Env> {
 
     if (rows.length > 0) {
       const ids = rows.map((r) => r.id);
-      this.sql.exec(
-        `DELETE FROM audit_buffer WHERE id IN (${ids.map(() => '?').join(',')})`,
-        ...ids,
-      );
+      // SQLite 变量上限是 100（D1/DO 侧同源限制）：缓冲积压超过 ~99 行时
+      // IN (...) 的占位符会超限，整条 DELETE 报「too many SQL variables」，
+      // 审计页因此 500。分批删除兜底。
+      for (let i = 0; i < ids.length; i += 90) {
+        const chunk = ids.slice(i, i + 90);
+        this.sql.exec(
+          `DELETE FROM audit_buffer WHERE id IN (${chunk.map(() => '?').join(',')})`,
+          ...chunk,
+        );
+      }
     }
 
     return rows.map((r) => ({

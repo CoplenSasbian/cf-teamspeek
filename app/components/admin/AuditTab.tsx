@@ -1,9 +1,9 @@
-import { useEffect, useState } from 'react';
-import { Download, ListChecks, RefreshCw, Loader2 } from 'lucide-react';
+import { useCallback, useEffect, useState } from 'react';
+import { Download, ListChecks, RefreshCw } from 'lucide-react';
 
 import { adminApi } from '~/lib/api';
 import { cn, relativeTime } from '~/lib/utils';
-import { PanelSkeleton } from './OverviewTab';
+import { DataTable, TableSearch, type Column } from './DataTable';
 
 interface AuditRow {
   id: string;
@@ -38,196 +38,172 @@ const EVENT_OPTIONS = [
   { value: 'kick', label: '被踢出' },
 ];
 
+/**
+ * 会话审计 —— 服务端分页（D1 `LIMIT/OFFSET`），支持昵称/事件筛选。
+ */
 export function AuditTab() {
   const [rows, setRows] = useState<AuditRow[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
-  const [pageSize] = useState(50);
+  const [pageSize, setPageSize] = useState(50);
   const [nickname, setNickname] = useState('');
   const [event, setEvent] = useState('');
   const [loading, setLoading] = useState(true);
 
-  async function load(p = page, filters = { nickname, event }) {
-    setLoading(true);
-    try {
-      const res = await adminApi.audit({
-        page: p,
-        pageSize,
-        ...(filters.nickname ? { nickname: filters.nickname } : {}),
-        ...(filters.event ? { event: filters.event } : {}),
-      });
-      setRows(res.rows as unknown as AuditRow[]);
-      setTotal(res.total);
-    } catch {
-      setRows([]);
-      setTotal(0);
-    } finally {
-      setLoading(false);
-    }
-  }
+  const load = useCallback(
+    async (p: number, size: number, filters: { nickname: string; event: string }) => {
+      setLoading(true);
+      try {
+        const res = await adminApi.audit({
+          page: p,
+          pageSize: size,
+          ...(filters.nickname ? { nickname: filters.nickname } : {}),
+          ...(filters.event ? { event: filters.event } : {}),
+        });
+        setRows(res.rows as unknown as AuditRow[]);
+        setTotal(res.total);
+      } catch {
+        setRows([]);
+        setTotal(0);
+      } finally {
+        setLoading(false);
+      }
+    },
+    [],
+  );
 
   useEffect(() => {
-    void load(1);
+    void load(page, pageSize, { nickname, event });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [page, pageSize, load]);
 
-  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const columns: Column<AuditRow>[] = [
+    {
+      key: 'time',
+      header: '时间',
+      render: (row) => (
+        <span className="whitespace-nowrap text-xs text-ink-3" title={new Date(row.created_at).toLocaleString()}>
+          {relativeTime(row.created_at)}
+        </span>
+      ),
+    },
+    {
+      key: 'nickname',
+      header: '昵称',
+      render: (row) => (
+        <span className="text-ink-2">
+          {row.nickname ?? '—'}
+          {row.role === 'admin' && <span className="ml-1.5 text-[10px] text-warn">管理员</span>}
+        </span>
+      ),
+    },
+    {
+      key: 'event',
+      header: '事件',
+      render: (row) => {
+        const meta = EVENT_META[row.event] ?? { label: row.event, tone: 'bg-surface-2 text-ink-2' };
+        return (
+          <span className={cn('inline-block rounded-md px-2 py-0.5 text-xs font-medium', meta.tone)}>
+            {meta.label}
+          </span>
+        );
+      },
+    },
+    {
+      key: 'room',
+      header: '房间',
+      render: (row) => <span className="font-mono text-xs text-ink-3">{row.room_id ?? '—'}</span>,
+    },
+    {
+      key: 'geo',
+      header: '地域',
+      render: (row) => (
+        <span className="text-xs text-ink-3">
+          {row.country ? `${row.country}${row.city ? ` · ${row.city}` : ''}` : '—'}
+        </span>
+      ),
+    },
+    {
+      key: 'ip',
+      header: 'IP 前缀',
+      render: (row) => <span className="font-mono text-xs text-ink-3">{row.ip_prefix ?? '—'}</span>,
+    },
+  ];
 
   return (
-    <div className="flex flex-col gap-4">
-      {/* 工具条 */}
-      <div className="flex flex-wrap items-center gap-2">
-        <h3 className="mr-auto flex items-center gap-2 text-sm font-semibold text-ink-2">
-          <ListChecks className="h-4 w-4 text-accent" />
-          会话审计
-          <span className="text-xs font-normal text-ink-3">共 {total} 条</span>
-        </h3>
+    <DataTable
+      columns={columns}
+      rows={rows}
+      rowKey={(row) => row.id}
+      loading={loading}
+      emptyText="没有匹配的记录"
+      pagination={{
+        page,
+        pageSize,
+        total,
+        onPageChange: setPage,
+        onPageSizeChange: (s) => {
+          setPageSize(s);
+          setPage(1);
+        },
+      }}
+      toolbar={
+        <>
+          <h3 className="mr-auto flex items-center gap-2 text-sm font-semibold text-ink-2">
+            <ListChecks className="h-4 w-4 text-accent" />
+            会话审计
+          </h3>
 
-        <input
-          value={nickname}
-          onChange={(e) => setNickname(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') {
+          <TableSearch
+            value={nickname}
+            onChange={(v) => {
+              setNickname(v);
+              if (v === '') {
+                setPage(1);
+                void load(1, pageSize, { nickname: '', event });
+              }
+            }}
+            onSearch={() => {
               setPage(1);
-              void load(1);
-            }
-          }}
-          placeholder="按昵称筛选"
-          className="w-36 rounded-lg border border-line px-3 py-1.5 text-xs outline-none focus:border-accent"
-        />
-
-        <select
-          value={event}
-          onChange={(e) => {
-            setEvent(e.target.value);
-            setPage(1);
-            void load(1, { nickname, event: e.target.value });
-          }}
-          className="rounded-lg border border-line px-3 py-1.5 text-xs outline-none focus:border-accent"
-        >
-          {EVENT_OPTIONS.map((o) => (
-            <option key={o.value} value={o.value}>
-              {o.label}
-            </option>
-          ))}
-        </select>
-
-        <button
-          onClick={() => {
-            setPage(1);
-            void load(1);
-          }}
-          className="flex items-center gap-1.5 rounded-lg border border-line bg-surface px-2.5 py-1.5 text-xs font-medium text-ink-2 hover:bg-surface-2"
-        >
-          <RefreshCw className="h-3.5 w-3.5" />
-          刷新
-        </button>
-
-        <a
-          href={adminApi.auditExportUrl()}
-          className="flex items-center gap-1.5 rounded-lg bg-accent px-2.5 py-1.5 text-xs font-medium text-white hover:bg-accent-hover"
-        >
-          <Download className="h-3.5 w-3.5" />
-          导出 CSV
-        </a>
-      </div>
-
-      {/* 表格 */}
-      {loading ? (
-        <PanelSkeleton />
-      ) : rows.length === 0 ? (
-        <p className="rounded-2xl border border-dashed border-line py-12 text-center text-sm text-ink-3">
-          没有匹配的记录
-        </p>
-      ) : (
-        <div className="overflow-x-auto rounded-2xl border border-line bg-surface">
-          <table className="w-full text-left text-sm">
-            <thead>
-              <tr className="border-b border-line-soft text-xs text-ink-3">
-                <th className="px-4 py-3 font-medium">时间</th>
-                <th className="px-4 py-3 font-medium">昵称</th>
-                <th className="px-4 py-3 font-medium">事件</th>
-                <th className="px-4 py-3 font-medium">房间</th>
-                <th className="px-4 py-3 font-medium">地域</th>
-                <th className="px-4 py-3 font-medium">IP 前缀</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((row) => {
-                const meta = EVENT_META[row.event] ?? {
-                  label: row.event,
-                  tone: 'bg-surface-2 text-ink-2',
-                };
-                return (
-                  <tr key={row.id} className="border-b border-line-soft last:border-0">
-                    <td className="whitespace-nowrap px-4 py-2.5 text-xs text-ink-3">
-                      {relativeTime(row.created_at)}
-                    </td>
-                    <td className="px-4 py-2.5">
-                      <span className="text-ink-2">{row.nickname ?? '—'}</span>
-                      {row.role === 'admin' && (
-                        <span className="ml-1.5 text-[10px] text-warn">管理员</span>
-                      )}
-                    </td>
-                    <td className="px-4 py-2.5">
-                      <span
-                        className={cn(
-                          'inline-block rounded-md px-2 py-0.5 text-xs font-medium',
-                          meta.tone,
-                        )}
-                      >
-                        {meta.label}
-                      </span>
-                    </td>
-                    <td className="px-4 py-2.5 font-mono text-xs text-ink-3">
-                      {row.room_id ?? '—'}
-                    </td>
-                    <td className="px-4 py-2.5 text-xs text-ink-3">
-                      {row.country ? `${row.country}${row.city ? ` · ${row.city}` : ''}` : '—'}
-                    </td>
-                    <td className="px-4 py-2.5 font-mono text-xs text-ink-3">
-                      {row.ip_prefix ?? '—'}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      )}
-
-      {/* 分页 */}
-      {totalPages > 1 && (
-        <div className="flex items-center justify-center gap-2">
-          <button
-            disabled={page <= 1}
-            onClick={() => {
-              const p = page - 1;
-              setPage(p);
-              void load(p);
+              void load(1, pageSize, { nickname, event });
             }}
-            className="rounded-lg border border-line bg-surface px-3 py-1.5 text-xs font-medium text-ink-2 disabled:opacity-40"
-          >
-            上一页
-          </button>
-          <span className="text-xs text-ink-3">
-            {page} / {totalPages}
-          </span>
-          <button
-            disabled={page >= totalPages}
-            onClick={() => {
-              const p = page + 1;
-              setPage(p);
-              void load(p);
+            placeholder="按昵称筛选（回车）"
+            className="w-44"
+          />
+
+          <select
+            value={event}
+            onChange={(e) => {
+              setEvent(e.target.value);
+              setPage(1);
+              void load(1, pageSize, { nickname, event: e.target.value });
             }}
-            className="rounded-lg border border-line bg-surface px-3 py-1.5 text-xs font-medium text-ink-2 disabled:opacity-40"
+            className="rounded-lg border border-line bg-surface px-3 py-1.5 text-xs outline-none focus:border-accent"
           >
-            下一页
+            {EVENT_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+
+          <button
+            onClick={() => void load(page, pageSize, { nickname, event })}
+            className="flex items-center gap-1.5 rounded-lg border border-line bg-surface px-2.5 py-1.5 text-xs font-medium text-ink-2 hover:bg-surface-2"
+          >
+            <RefreshCw className="h-3.5 w-3.5" />
+            刷新
           </button>
-        </div>
-      )}
-    </div>
+
+          <a
+            href={adminApi.auditExportUrl()}
+            className="flex items-center gap-1.5 rounded-lg bg-accent px-2.5 py-1.5 text-xs font-medium text-white hover:bg-accent-hover"
+          >
+            <Download className="h-3.5 w-3.5" />
+            导出 CSV
+          </a>
+        </>
+      }
+    />
   );
 }
-
-export { Loader2 };
