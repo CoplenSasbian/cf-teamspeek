@@ -1,0 +1,54 @@
+{
+  "name": "cf-teamspeed",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "基于 Cloudflare Realtime SFU + Workers 的私人游戏语音室",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "react-router build",
+    "deploy": "npm run build && wrangler deploy",
+    "preview": "vite preview",
+    "cf-typegen": "wrangler types",
+    "typecheck": "react-router typegen && tsc --noEmit",
+    "gen:avatars": "tsx scripts/gen-avatars.ts",
+    "db:migrate:local": "wrangler d1 migrations apply cf-teamspeed --local",
+    "db:migrate:remote": "wrangler d1 migrations apply cf-teamspeed --remote",
+    "db:studio": "wrangler d1 studio cf-teamspeed --local"
+  },
+  "dependencies": {
+    "@dicebear/collection": "^9.4.2",
+    "@dicebear/core": "^9.4.2",
+    "@hono/zod-validator": "^0.7.0",
+    "clsx": "^2.1.1",
+    "hono": "^4.13.10",
+    "jose": "^6.2.12",
+    "lucide-react": "^0.469.0",
+    "nanoid": "^5.1.6",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "react-router": "^8.4.0",
+    "recharts": "^3.10.1",
+    "tailwind-merge": "^3.7.0",
+    "zod": "^4.6.5",
+    "isbot": "^5"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.62.0",
+    "@cloudflare/workers-types": "^5.20260928.1",
+    "@react-router/dev": "^8.4.0",
+    "@tailwindcss/vite": "^4.3.3",
+    "@types/node": "^22.10.5",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "tailwindcss": "^4.3.3",
+    "tsx": "^4.23.15",
+    "typescript": "^5.7.3",
+    "vite": "^7.1.0",
+    "wrangler": "4.142.0"
+  }
+}

@@ -1,0 +1,64 @@
+{
+  "avatars": [
+    {
+      "id": "bottts-01",
+      "style": "bottts",
+      "seed": "Nova"
+    },
+    {
+      "id": "bottts-02",
+      "style": "bottts",
+      "seed": "Pixel"
+    },
+    {
+      "id": "pixel-art-01",
+      "style": "pixelArt",
+      "seed": "Knight"
+    },
+    {
+      "id": "pixel-art-02",
+      "style": "pixelArt",
+      "seed": "Mage"
+    },
+    {
+      "id": "adventurer-01",
+      "style": "adventurer",
+      "seed": "Scout"
+    },
+    {
+      "id": "adventurer-02",
+      "style": "adventurer",
+      "seed": "Ranger"
+    },
+    {
+      "id": "lorelei-01",
+      "style": "lorelei",
+      "seed": "Aria"
+    },
+    {
+      "id": "lorelei-02",
+      "style": "lorelei",
+      "seed": "Luna"
+    },
+    {
+      "id": "fun-emoji-01",
+      "style": "funEmoji",
+      "seed": "Happy"
+    },
+    {
+      "id": "fun-emoji-02",
+      "style": "funEmoji",
+      "seed": "Cool"
+    },
+    {
+      "id": "shapes-01",
+      "style": "shapes",
+      "seed": "Geo"
+    },
+    {
+      "id": "identicon-01",
+      "style": "identicon",
+      "seed": "Meta"
+    }
+  ]
+}

@@ -1,0 +1,145 @@
+# ============================================================
+#  cf-teamspeed 应用配置模板
+# ============================================================
+#  用法：
+#    cp config.example.yml config.yml
+#    然后按需修改
+#
+#  本文件【可以】提交到 git（只有默认值，无敏感信息）
+#  config.yml（你实际使用的）已被 .gitignore 排除
+#
+#  这里只放【非敏感】配置。
+#  密钥请放在 .dev.vars，见 .dev.vars.example
+#
+#  这些值最终注入 wrangler.jsonc 的 vars。
+#  同名键以 wrangler.jsonc 为准。
+# ============================================================
+
+app:
+  # 应用显示名称（出现在页面标题和后台顶部）
+  name: "游戏语音室"
+
+  # 管理员后台路径
+  # 访问 <你的域名>/dev 进入后台
+  # 想更隐蔽可以改成一个随机串，比如 /x7k2m9
+  admin_path: "/dev"
+
+  # 页面语言
+  locale: "zh-CN"
+
+
+room:
+  # 单个房间默认人数上限
+  # 免费额度下建议不要超过 15
+  max_members: 10
+
+  # 单次通话最长时长（分钟）
+  # 超时后客户端提示续期，防止忘记退出一直占着 SFU 流量
+  # 设为 0 表示不限制
+  max_duration_minutes: 480
+
+  # 心跳间隔（秒）
+  heartbeat_interval_seconds: 15
+
+  # 超过多久没心跳判定为离线（秒）
+  # 必须大于 heartbeat_interval_seconds
+  offline_timeout_seconds: 45
+
+  # 房间空闲多久后自动回收（分钟）
+  # 所有人离开后，DO 等待这个时长再清理资源
+  idle_recycle_minutes: 2
+
+
+audio:
+  # 是否开启端到端加密
+  # true  = AES-GCM 加密，SFU 只转发密文（推荐，但需要较新浏览器）
+  # false = 仅依赖 WebRTC 自带的 DTLS-SRTP 传输层加密
+  e2ee: true
+
+  # 浏览器不支持 E2EE 时是否自动降级
+  # true  = 提示用户后继续通话（仅 DTLS-SRTP）
+  # false = 直接拒绝进入房间
+  e2ee_fallback: true
+
+  # Opus 音频码率（kbps）
+  # 语音场景 24-32 足够；调低可省 SFU 流量
+  # 参考：32kbps 下 10 人房每天 4 小时约 7GB
+  audio_bitrate_kbps: 32
+
+  # 开启回声消除、噪声抑制、自动增益
+  echo_cancellation: true
+  noise_suppression: true
+  auto_gain_control: true
+
+  # 默认静音进入房间（进房后需手动开麦）
+  join_muted: true
+
+
+avatar:
+  # 允许用户上传自定义头像
+  allow_upload: true
+
+  # 上传头像压缩后边长（像素，正方形）
+  upload_size: 256
+
+  # 上传头像压缩质量（0-1）
+  upload_quality: 0.8
+
+  # 单张头像最大字节数（压缩后仍超过则拒绝）
+  max_upload_bytes: 51200
+
+
+security:
+  # 登录失败多少次后锁定该 IP
+  login_max_attempts: 5
+
+  # 锁定时长（分钟）
+  login_lockout_minutes: 15
+
+  # 会话有效期（小时）
+  session_ttl_hours: 12
+
+  # 管理员后台是否强制 Turnstile 人机验证
+  require_turnstile: true
+
+  # 昵称规则
+  nickname:
+    min_length: 1
+    max_length: 16
+    # 禁止的昵称（精确匹配，不区分大小写）
+    reserved:
+      - "admin"
+      - "administrator"
+      - "root"
+      - "system"
+      - "官方"
+      - "管理员"
+      - "系统"
+
+
+usage:
+  # 用量统计聚合写入 D1 的时间窗口（分钟）
+  # 窗口越长，D1 写入越少
+  # 免费版 D1 每天只有 10 万行写入，不要把这个值设太小
+  flush_interval_minutes: 10
+
+  # 免费额度阈值，用于后台进度条与告警
+  free_tier:
+    # SFU + TURN 共享的出站流量（GB/月）
+    sfu_egress_gb_month: 1000
+    # Workers 请求数（次/天）
+    worker_requests_day: 100000
+    # Durable Objects 请求数（次/天）
+    do_requests_day: 100000
+    # Durable Objects 时长（GB-s/天）
+    do_duration_gbs_day: 13000
+    # D1 行读取（行/天）
+    d1_reads_day: 5000000
+    # D1 行写入（行/天）
+    d1_writes_day: 100000
+
+  # 用量达到额度的百分之多少时在后台显示警告
+  warn_threshold_percent: 80
+
+  # 审计流水保留天数（超过由定时任务清理）
+  audit_retention_days: 90

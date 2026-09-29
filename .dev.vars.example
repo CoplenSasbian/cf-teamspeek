@@ -1,0 +1,120 @@
+# ============================================================
+#  cf-teamspeed 密钥配置模板
+# ============================================================
+#  用法：
+#    cp .dev.vars.example .dev.vars
+#    然后把下面的占位符替换成真实值
+#
+#  本文件【可以】提交到 git，因为它只有占位符
+#  .dev.vars（真实值）已被 .gitignore 排除
+#
+#  各项的获取方式见 DESIGN.md 第 21 章「凭据获取指南」
+# ============================================================
+
+
+# ------------------------------------------------------------
+# 1. Cloudflare Realtime SFU
+# ------------------------------------------------------------
+# 获取：https://dash.cloudflare.com/?to=%2F%3Aaccount%2Frealtime%2Fsfu
+#      → Create application → 创建后立即复制
+# ⚠️ App Secret 只显示一次！关掉页面就只能重建应用
+
+REALTIME_SFU_APP_ID=
+REALTIME_SFU_BEARER_TOKEN=
+
+
+# ------------------------------------------------------------
+# 2. 访客密钥 —— 发给朋友用
+# ------------------------------------------------------------
+# 权限：登录、进/退房间、开关自己的麦克风
+# 建议：>= 16 字符，可以自己定一句好记的
+# 生成：node -e "console.log(crypto.randomUUID())"
+
+GUEST_KEY=
+
+
+# ------------------------------------------------------------
+# 3. 管理员密钥 —— 只有自己知道
+# ------------------------------------------------------------
+# 权限：访客全部权限 + 后台 + 管理操作（踢人/封禁/关房/释放昵称）
+# 建议：随机 UUID，不要用可猜的字符串
+# 生成：node -e "console.log(crypto.randomUUID())"
+
+ADMIN_KEY=
+
+
+# ------------------------------------------------------------
+# 4. 会话 JWT 签名密钥
+# ------------------------------------------------------------
+# 用途：签发与校验登录会话
+# 生成：node -e "console.log(crypto.randomUUID())"
+# ⚠️ 更换此值会导致所有已登录用户立即掉线
+
+SESSION_SECRET=
+
+
+# ------------------------------------------------------------
+# 5. Cloudflare Turnstile Secret Key（保密）
+# ------------------------------------------------------------
+# 【开发阶段】直接用官方测试 key（总是通过），不需要建 widget：
+#
+#     TURNSTILE_SECRET_KEY=1x0000000000000000000000000000000AA
+#
+#   对应 wrangler.jsonc 的 TURNSTILE_SITE_KEY 填 1x00000000000000000000AA
+#
+# 【部署前】换成真实 widget 的 key：
+#   获取：https://dash.cloudflare.com/?to=%2F%3Aaccount%2Fturnstile
+#         → Add widget → Widget Mode: Managed
+#         → Hostname 填你的域名
+#
+#   注意：生产 secret key 会拒绝测试 token，上线前必须换
+#
+# 可选测试 key 对照：
+#   总是通过   site 1x00000000000000000000AA  secret 1x0000000000000000000000000000000AA
+#   总是拦截   site 2x00000000000000000000AB  secret 2x0000000000000000000000000000000AA
+#   强制交互   site 3x00000000000000000000FF  secret 3x0000000000000000000000000000000AA
+
+TURNSTILE_SECRET_KEY=
+
+
+# ------------------------------------------------------------
+# 6. 可选：Cloudflare 账户级 API Token
+# ------------------------------------------------------------
+# 用途：后台「用量看板」从 GraphQL Analytics API 拉权威数据做交叉校验
+# 留空影响：用量看板仅用本地聚合计数（仍精确，但无云端验证）
+# 获取：https://dash.cloudflare.com/profile/api-tokens
+#      权限：Account → Account Analytics → Read
+#            Account → Workers Scripts → Read（可选）
+
+CF_ANALYTICS_API_TOKEN=
+
+
+# ------------------------------------------------------------
+# 7. 可选：Cloudflare 账户 ID
+# ------------------------------------------------------------
+# 配合上面第 6 项使用。`wrangler whoami` 可查看
+# 留空则跳过云端用量校验
+
+CF_ACCOUNT_ID=
+
+
+# ============================================================
+#  生产部署
+# ============================================================
+#
+# 本地开发：Wrangler 自动读取 .dev.vars，无需额外操作
+#
+# 部署生产：逐个执行，把值粘贴进去
+#
+#   wrangler secret put REALTIME_SFU_APP_ID
+#   wrangler secret put REALTIME_SFU_BEARER_TOKEN
+#   wrangler secret put GUEST_KEY
+#   wrangler secret put ADMIN_KEY
+#   wrangler secret put SESSION_SECRET
+#   wrangler secret put TURNSTILE_SECRET_KEY
+#
+# 查看已写入的密钥名（不显示值）：
+#
+#   wrangler secret list
+#
+# ============================================================

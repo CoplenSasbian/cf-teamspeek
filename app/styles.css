@@ -1,0 +1,234 @@
+@import 'tailwindcss';
+
+/* ============================================================
+   深色模式：跟随系统（class 策略）
+   由 root.tsx 的首帧引导脚本写入 .dark / .light，
+   并监听 prefers-color-scheme 变化实时切换。
+   ============================================================ */
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --font-sans: system-ui, -apple-system, 'Segoe UI', 'PingFang SC',
+    'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+  --font-mono: ui-monospace, 'Cascadia Code', 'Source Code Pro', Menlo, monospace;
+
+  --color-brand-50: #eef4ff;
+  --color-brand-100: #d9e5ff;
+  --color-brand-200: #bcd1ff;
+  --color-brand-300: #8eb3ff;
+  --color-brand-400: #598bff;
+  --color-brand-500: #3366ff;
+  --color-brand-600: #1f47e6;
+  --color-brand-700: #1a37b8;
+  --color-brand-800: #1a3193;
+  --color-brand-900: #1b2f75;
+}
+
+/* ============================================================
+   语义化色板（浅色为默认值，.dark 下整体覆盖）
+   目的：所有组件只写一次类名 bg-app / bg-surface / text-ink …
+   切换主题时自动生效，无需在每个元素上写 dark: 前缀。
+   ============================================================ */
+:root {
+  color-scheme: light;
+
+  /* 页面底色（沉浸式渐变的两端） */
+  --c-app: #f5f7fb;
+  --c-app-mid: #eef2f9;
+  --c-app-glow: rgb(51 102 255 / 0.09);
+
+  /* 表面层级 */
+  --c-surface: #ffffff;
+  --c-surface-2: #f1f5f9;
+  --c-surface-3: #e2e8f0;
+  --c-surface-glass: rgb(255 255 255 / 0.78);
+
+  /* 描边 */
+  --c-border: #e2e8f0;
+  --c-border-soft: #eef2f7;
+
+  /* 文字 */
+  --c-ink: #0f172a;
+  --c-ink-2: #475569;
+  --c-ink-3: #94a3b8;
+
+  /* 强调色（与 brand 同源；深色下提亮保证对比度） */
+  --c-accent: #1f47e6;
+  --c-accent-hover: #1a37b8;
+  --c-accent-soft: #eef4ff;
+  --c-accent-ink: #1a37b8;
+
+  /* 状态色 */
+  --c-up: #10b981;
+  --c-warn: #f59e0b;
+  --c-down: #ef4444;
+
+  --c-shadow: 0 1px 2px rgb(15 23 42 / 0.04), 0 12px 32px -12px rgb(15 23 42 / 0.14);
+  --c-shadow-lg: 0 2px 4px rgb(15 23 42 / 0.05), 0 24px 48px -16px rgb(15 23 42 / 0.22);
+}
+
+.dark {
+  color-scheme: dark;
+
+  --c-app: #0a0f1c;
+  --c-app-mid: #0d1424;
+  --c-app-glow: rgb(56 106 255 / 0.16);
+
+  --c-surface: #141b2d;
+  --c-surface-2: #1c2438;
+  --c-surface-3: #273049;
+  --c-surface-glass: rgb(20 27 45 / 0.72);
+
+  --c-border: #262f47;
+  --c-border-soft: #1e2639;
+
+  --c-ink: #f1f5f9;
+  --c-ink-2: #a3aec3;
+  --c-ink-3: #6b7691;
+
+  --c-accent: #4d74ff;
+  --c-accent-hover: #6285ff;
+  --c-accent-soft: #1b2647;
+  --c-accent-ink: #9db4ff;
+
+  --c-up: #34d399;
+  --c-warn: #fbbf24;
+  --c-down: #f87171;
+
+  --c-shadow: 0 1px 2px rgb(0 0 0 / 0.4), 0 16px 40px -16px rgb(0 0 0 / 0.7);
+  --c-shadow-lg: 0 2px 6px rgb(0 0 0 / 0.45), 0 32px 64px -20px rgb(0 0 0 / 0.8);
+}
+
+@theme inline {
+  --color-app: var(--c-app);
+  --color-app-mid: var(--c-app-mid);
+  --color-surface: var(--c-surface);
+  --color-surface-2: var(--c-surface-2);
+  --color-surface-3: var(--c-surface-3);
+  --color-surface-glass: var(--c-surface-glass);
+  --color-line: var(--c-border);
+  --color-line-soft: var(--c-border-soft);
+  --color-ink: var(--c-ink);
+  --color-ink-2: var(--c-ink-2);
+  --color-ink-3: var(--c-ink-3);
+  --color-accent: var(--c-accent);
+  --color-accent-hover: var(--c-accent-hover);
+  --color-accent-soft: var(--c-accent-soft);
+  --color-accent-ink: var(--c-accent-ink);
+  --color-up: var(--c-up);
+  --color-warn: var(--c-warn);
+  --color-down: var(--c-down);
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  background-color: var(--c-app);
+  color: var(--c-ink);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 沉浸式底纹：顶部一团柔和光晕，深浅色各自适配 */
+.app-backdrop {
+  background:
+    radial-gradient(900px 520px at 50% -12%, var(--c-app-glow), transparent 68%),
+    linear-gradient(180deg, var(--c-app) 0%, var(--c-app-mid) 100%);
+}
+
+/* 安全区（WebView 套壳用得上） */
+.safe-top {
+  padding-top: max(0.75rem, env(safe-area-inset-top));
+}
+.safe-bottom {
+  padding-bottom: max(1rem, env(safe-area-inset-bottom));
+}
+
+/* ------------------------------------------------------------
+   说话光圈
+   ------------------------------------------------------------ */
+@keyframes speaking-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgb(16 185 129 / 0.55);
+  }
+  50% {
+    box-shadow: 0 0 0 10px rgb(16 185 129 / 0);
+  }
+}
+
+.speaking-ring {
+  animation: speaking-pulse 1.1s ease-out infinite;
+}
+
+/* 头像网格里说话者的柔光背景 */
+@keyframes speaking-glow {
+  0%,
+  100% {
+    opacity: 0.45;
+    transform: scale(0.94);
+  }
+  50% {
+    opacity: 0.85;
+    transform: scale(1.02);
+  }
+}
+
+.speaking-glow {
+  animation: speaking-glow 1.6s ease-in-out infinite;
+}
+
+/* ------------------------------------------------------------
+   音量条 / 连接质量
+   ------------------------------------------------------------ */
+@keyframes bar-bounce {
+  0%,
+  100% {
+    transform: scaleY(0.35);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
+
+.eq-bar {
+  transform-origin: bottom;
+  animation: bar-bounce 0.9s ease-in-out infinite;
+}
+
+/* 入场：卡片与网格元素淡入上浮 */
+@keyframes rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.rise-in {
+  animation: rise-in 0.28s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .speaking-ring,
+  .speaking-glow,
+  .eq-bar,
+  .rise-in {
+    animation: none !important;
+  }
+}
+
+/* 细滚动条 */
+.thin-scroll::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.thin-scroll::-webkit-scrollbar-thumb {
+  background: var(--c-surface-3);
+  border-radius: 9999px;
+}
