@@ -2,14 +2,22 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Outlet, useLocation, useNavigate } from 'react-router';
 import { AlertTriangle, Check, Loader2, Menu, Settings, Users, X } from 'lucide-react';
 
-import { SettingsPanel } from '~/components/SettingsPanel';
+import { SettingsPanel, type SettingsTab } from '~/components/SettingsPanel';
 import { InviteToasts } from '~/components/InviteToasts';
 import { MemberRail } from '~/components/MemberRail';
 import { RoomDialog, type RoomDraft } from '~/components/RoomDialog';
 import { Sidebar } from '~/components/Sidebar';
 import { ApiError, authApi, presenceApi, roomsApi, setBaseUrl } from '~/lib/api';
 import type { DenoiseEngine } from '~/lib/denoise';
-import { loadSettings, resolveBaseUrl, saveSettings, buildInviteUrl } from '~/lib/settings';
+import { audioMixer } from '~/lib/audio-mixer';
+import {
+  buildInviteUrl,
+  loadSettings,
+  micInputPrefsOf,
+  resolveBaseUrl,
+  saveSettings,
+  voiceGatePrefsOf,
+} from '~/lib/settings';
 import { usePresence } from '~/lib/use-presence';
 import { cn } from '~/lib/utils';
 import { DEFAULT_ROOM_ID } from '@shared/constants';
@@ -70,6 +78,11 @@ export interface ShellContext {
   deleteRoom: (room: RoomWithMembers) => Promise<boolean>;
   /** 服务端配置的默认人数上限 */
   maxRoomMembers: number;
+  /** 打开设置面板（可指定停在哪个页签） */
+  openSettings: (tab?: SettingsTab) => void;
+  /** 进房前的本地音频偏好（试麦卡片用）：只存设置，进房时才建管线 */
+  denoise: DenoiseEngine;
+  setDenoise: (engine: DenoiseEngine) => void;
   /** 语音状态（侧栏语音面板用），由房间页填充 */
   voice: VoiceStatus | null;
   /** 房间页上报语音状态（麦克风/连接/时长/电平） */
@@ -107,6 +120,12 @@ export default function AppShell() {
   const [pendingUid, setPendingUid] = useState<string | null>(null);
   const [drawer, setDrawer] = useState<Drawer>('none');
   const [showSettings, setShowSettings] = useState(false);
+  /** 打开设置面板时停在哪个页签（进房前卡片直接跳「音频」） */
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>('account');
+  const openSettings = useCallback((tab: SettingsTab = 'account') => {
+    setSettingsTab(tab);
+    setShowSettings(true);
+  }, []);
   /** 'create' | 'edit' | null —— 房间弹窗模式 */
   const [roomDialog, setRoomDialog] = useState<'create' | 'edit' | null>(null);
   /** 编辑弹窗作用的房间 id：不传就是「当前所在房间」（侧栏右键时用） */
@@ -234,6 +253,10 @@ export default function AppShell() {
       status,
       invitable: s.invitable !== false,
       denoise: s.denoise?.engine ?? ('off' as DenoiseEngine),
+      /** 浏览器自带降噪 / 自动增益（作用在采集层，与 GTCRN 串联） */
+      input: micInputPrefsOf(s),
+      /** 语音门限：低于阈值不发送 */
+      gate: voiceGatePrefsOf(s),
     };
   });
 
@@ -244,6 +267,9 @@ export default function AppShell() {
         presenceStatus: next.status,
         invitable: next.invitable,
         denoise: { engine: next.denoise },
+        // ⚠️ saveSettings 是「顶层浅合并」，input 是整体替换的 ——
+        //    所以门限必须一起写进去，否则改任何别的偏好都会把门限设置抹掉。
+        input: { ...next.input, gate: next.gate },
       });
       return next;
     });
@@ -251,6 +277,25 @@ export default function AppShell() {
 
   /** 降噪切换的「进行中」标记（重建管线需要 1-2 秒） */
   const [denoiseSwitching, setDenoiseSwitching] = useState(false);
+
+  /**
+   * 【进房前】只保存降噪选择。
+   * 首页没有麦克风管线可以热切换，所以这里不调 applyDenoise ——
+   * 引擎会在进房建管线时被读出来生效。
+   */
+  const setDenoise = useCallback(
+    (engine: DenoiseEngine) => {
+      updatePrefs({ denoise: engine });
+      notify(
+        engine === 'off'
+          ? '降噪已关闭，进房后发送原始麦克风'
+          : engine === 'gtcrn'
+            ? '已选 GTCRN，进房后生效'
+            : '已选 RNNoise，进房后生效',
+      );
+    },
+    [updatePrefs, notify],
+  );
 
   /**
    * 循环切换降噪：off → gtcrn → rnnoise → off。
@@ -273,6 +318,9 @@ export default function AppShell() {
               ? 'GTCRN 降噪已生效'
               : 'RNNoise 降噪已生效',
         );
+      } else if (next !== 'off' && audioMixer.hasMicPipeline()) {
+        // 在房间里但没生效：模型没起来，已回退原始麦克风
+        notify('降噪没能启动（模型初始化失败），已回退为发送原始麦克风', 'error');
       } else if (next !== 'off') {
         notify('已保存，将在下次进入房间时生效', 'info');
       }
@@ -510,7 +558,7 @@ export default function AppShell() {
       onDeleteRoom={deleteRoom}
       onRefresh={() => void refreshRooms()}
       onLogout={() => void logout()}
-      onOpenSettings={() => setShowSettings(true)}
+      onOpenSettings={() => openSettings('account')}
       onCopyInvite={() => void copyInvite()}
       voice={voice}
       onLeaveRoom={leaveRoom}
@@ -566,6 +614,9 @@ export default function AppShell() {
     canEditRoom,
     deleteRoom,
     maxRoomMembers,
+    openSettings,
+    denoise: prefs.denoise,
+    setDenoise,
     voice,
     reportVoice,
     applyDenoise,
@@ -705,6 +756,7 @@ export default function AppShell() {
           onCycleDenoise={() => void cycleDenoise()}
           measureLatency={measureLatency}
           onCopyInvite={() => void copyInvite()}
+          initialTab={settingsTab}
           onClose={() => setShowSettings(false)}
           onSaved={(p) => {
             // 只更新展示用的资料，uid 不变 —— 房间会话不该因此重建

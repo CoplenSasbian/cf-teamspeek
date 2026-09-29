@@ -1,5 +1,6 @@
 import type { GtcrnWorkletNode, RnnoiseWorkletNode } from '@sapphi-red/web-noise-suppressor';
-import type { Settings } from './settings';
+import { micAudioConstraints } from './sfu-session';
+import type { MicInputPrefs, Settings } from './settings';
 
 /**
  * 麦克风降噪引擎 —— 基于 @sapphi-red/web-noise-suppressor 的 AudioWorklet。
@@ -13,7 +14,7 @@ import type { Settings } from './settings';
  * `class extends AudioWorkletNode` 在 Workers 环境求值时直接崩掉
  * （ReferenceError: AudioWorkletNode is not defined）。
  *
- * 插入位置：麦克风源 → [降噪节点] → 混音器增益链路。
+ * 插入位置：麦克风源 → [高通] → [降噪节点] → 补偿增益 → 软限幅 → 发布。
  * worklet/wasm 资源已复制到 /public（gtcrn-worklet.js / gtcrn.wasm 等），
  * 由构建时脚本保证与 npm 包版本一致。
  */
@@ -32,6 +33,20 @@ type DenoiseNode = GtcrnWorkletNode | RnnoiseWorkletNode;
 let activeNode: DenoiseNode | null = null;
 /** 当前生效的引擎（createDenoiseNode 成功才更新 —— 失败回退时保持 off） */
 let activeEngine: DenoiseEngine = 'off';
+
+/**
+ * 降噪 worklet 的固有延迟（样本 @48kHz）。
+ *
+ * 两个引擎实测都是 640 样本（13.33ms），推导来自 worklet 里的环形缓冲：
+ *   - GTCRN：frameSize 768 = 6×128，写满一帧才推理，输出从帧内第 1 个
+ *     128 块开始吐 → (6-1)×128 = 640（前 5 块吐出的是初始化的全零）
+ *   - RNNoise：环形缓冲 1920，输出读指针 = 写指针 + 1280
+ *     → 1920-1280 = 640
+ *
+ * 自适应补偿必须把「降噪前」的测量也延迟这么多，否则两边比的是
+ * 两段相差 13ms 的声音 —— 语音在 10ms 尺度上起伏极大，比值会乱跳。
+ */
+export const DENOISE_LATENCY_SAMPLES = 640;
 
 /** 当前实际生效的降噪引擎（面板展示 / 调试用） */
 export function activeDenoiseEngine(): DenoiseEngine {
@@ -53,6 +68,81 @@ function isSimdSupported(): boolean {
   }
 }
 
+// ============================================================
+//  资源缓存：worklet 模块 + wasm 二进制
+// ============================================================
+
+/** 已 addModule 过的 worklet URL（按 AudioContext 记） */
+const loadedModules = new WeakMap<AudioContext, Set<string>>();
+/**
+ * wasm 二进制缓存。存 Promise 而不是结果：并发调用只会 fetch 一次；
+ * 失败时把缓存删掉，下次还能重试（否则一次网络抖动会永久毁掉降噪）。
+ */
+const wasmCache = new Map<string, Promise<ArrayBuffer>>();
+
+function fetchWasm(url: string): Promise<ArrayBuffer> {
+  const cached = wasmCache.get(url);
+  if (cached) return cached;
+
+  const pending = fetch(url)
+    .then(async (res) => {
+      if (!res.ok) throw new Error(`${url} 加载失败（${res.status}）`);
+      const buf = await res.arrayBuffer();
+      // 在主线程先验一遍二进制。
+      //
+      // 为什么必须在这一步拦：worklet 内部的实例化是【静默失败】的 ——
+      // 看 worklet 源码，processor 没建起来时 `process()` 走短路分支，
+      // 既不写输出也照样返回 true，外部完全看不出来，结果就是发布一条
+      // 永远静音的轨道。能在这里抛错，至少会走「回退直连」而不是变哑巴。
+      if (!WebAssembly.validate(buf)) throw new Error(`${url} 不是合法的 wasm`);
+      return buf;
+    })
+    .catch((err: unknown) => {
+      wasmCache.delete(url);
+      throw err;
+    });
+
+  wasmCache.set(url, pending);
+  return pending;
+}
+
+async function ensureModule(ctx: AudioContext, url: string): Promise<void> {
+  let done = loadedModules.get(ctx);
+  if (!done) {
+    done = new Set<string>();
+    loadedModules.set(ctx, done);
+  }
+  if (done.has(url)) return;
+  await ctx.audioWorklet.addModule(url);
+  done.add(url);
+}
+
+/** 引擎对应的资源 URL */
+function assetsOf(engine: Exclude<DenoiseEngine, 'off'>): { module: string; wasm: string } {
+  if (engine === 'gtcrn') return { module: GTCRN_WORKLET_URL, wasm: GTCRN_WASM_URL };
+  return {
+    module: RNNOISE_WORKLET_URL,
+    wasm: isSimdSupported() ? RNNOISE_SIMD_WASM_URL : RNNOISE_WASM_URL,
+  };
+}
+
+/**
+ * 预热：提前把 worklet 模块与 wasm 拉进缓存。
+ *
+ * 切换引擎的耗时几乎全在「fetch wasm + addModule」上，预热过之后再切就只剩
+ * 接线，用户感知不到停顿。失败无所谓（后续按需加载还会再试一遍），
+ * 所以这里只 warn 不抛。
+ */
+export async function prewarmDenoise(ctx: AudioContext, engine: DenoiseEngine): Promise<void> {
+  if (engine === 'off') return;
+  try {
+    const { module, wasm } = assetsOf(engine);
+    await Promise.all([ensureModule(ctx, module), fetchWasm(wasm)]);
+  } catch (err) {
+    console.warn('[denoise] 预热失败（不影响后续按需加载）', err);
+  }
+}
+
 /**
  * 创建降噪节点。返回 null 表示关闭降噪或初始化失败（失败时回退原始麦克风）。
  */
@@ -64,23 +154,14 @@ export async function createDenoiseNode(
 
   try {
     const { GtcrnWorkletNode: G, RnnoiseWorkletNode: R } = await loadWorklets();
+    const { module, wasm } = assetsOf(engine);
+    const [cached] = await Promise.all([fetchWasm(wasm), ensureModule(ctx, module)]);
+    // 传副本：缓存里的 ArrayBuffer 会被反复使用（切引擎、重进房、试听各一次），
+    // 万一将来某个环节把它 transfer 掉，缓存会变成一个长度 0 的空壳，
+    // 之后所有降噪都静默失效。复制一次 200KB 远比查这种 bug 便宜。
+    const wasmBinary = cached.slice(0);
 
-    if (engine === 'gtcrn') {
-      const wasmBinary = await fetch(GTCRN_WASM_URL).then((r) => {
-        if (!r.ok) throw new Error(`gtcrn.wasm 加载失败（${r.status}）`);
-        return r.arrayBuffer();
-      });
-      await ctx.audioWorklet.addModule(GTCRN_WORKLET_URL);
-      return new G(ctx, { wasmBinary, maxChannels: 1 });
-    }
-
-    // rnnoise
-    const simd = isSimdSupported();
-    const wasmBinary = await fetch(simd ? RNNOISE_SIMD_WASM_URL : RNNOISE_WASM_URL).then((r) => {
-      if (!r.ok) throw new Error(`rnnoise wasm 加载失败（${r.status}）`);
-      return r.arrayBuffer();
-    });
-    await ctx.audioWorklet.addModule(RNNOISE_WORKLET_URL);
+    if (engine === 'gtcrn') return new G(ctx, { wasmBinary, maxChannels: 1 });
     return new R(ctx, { wasmBinary, maxChannels: 1 });
   } catch (err) {
     console.error('[denoise] 初始化失败，回退原始麦克风', err);
@@ -89,94 +170,132 @@ export async function createDenoiseNode(
 }
 
 /** GTCRN worklet 支持的采样率（worklet 内部硬约束，超出会初始化失败并静音） */
-const SUPPORTED_SAMPLE_RATES = [16000, 48000];
+const GTCRN_SAMPLE_RATES = [16000, 48000];
+/**
+ * RNNoise worklet 假定 48kHz（库的 d.ts 原文 "Assumes sample rate to be 48kHz"），
+ * 帧长固定 480 样本。给它 16k 不会报错，但时间尺度整体错掉（一帧变成 30ms）。
+ * 现在 AudioContext 固定 48k，所以这条约束不会被触发；分开写是为了别把两个
+ * 引擎的采样率要求混为一谈（原实现共用一份 16k/48k 的列表，注释只提 GTCRN）。
+ */
+const RNNOISE_SAMPLE_RATES = [48000];
+
+function supportedRates(engine: Exclude<DenoiseEngine, 'off'>): number[] {
+  return engine === 'gtcrn' ? GTCRN_SAMPLE_RATES : RNNOISE_SAMPLE_RATES;
+}
+
+/** 断开节点（本来就没连时 disconnect() 会抛，属正常） */
+function safeDisconnect(node: AudioNode | null): void {
+  try {
+    node?.disconnect();
+  } catch {
+    /* 没有出边时 disconnect() 会抛，忽略 */
+  }
+}
+
+/** 释放 worklet 的 wasm 状态 */
+function destroyNode(node: DenoiseNode | null): void {
+  if (!node) return;
+  safeDisconnect(node);
+  try {
+    node.destroy?.();
+  } catch {
+    /* ignore */
+  }
+}
 
 /**
- * 把降噪链路插到「源 → 混音器」之间（或摘掉）。
- * 返回实际用于连接的终点节点：降噪开 → worklet；关 → 源本身。
+ * 一次性改接线：把 input 的出口从旧路径改到 node（node 为 null 表示直连 destination）。
  *
  * ⚠️ Web Audio 的 `connect()` 是【累加】的，不是替换。切换引擎时必须先把
- * `source` 上所有旧的出边断开，否则每切一次就多留一条路径 ——
- * 最终 `source → gain`（原始带噪信号）与 `source → worklet → gain`
+ * `input` 上所有旧的出边断开，否则每切一次就多留一条路径 ——
+ * 最终 `input → destination`（原始带噪信号）与 `input → worklet → destination`
  * （降噪信号）同时存在于同一个 gain 上，两路叠加，降噪被原始信号淹没，
  * 表现为「怎么切都没区别」。
+ *
+ * ⚠️ 断边与接线必须在本函数内一次做完（中间不能有 await）。图变更按渲染量子
+ * 提交：同一个 JS 任务里的 disconnect + connect 会在同一个量子生效，中间不
+ * 存在静音窗；一旦中间插入 await，那个量子就没人喂了。
+ */
+function rewire(input: AudioNode, destination: AudioNode, node: DenoiseNode | null): void {
+  safeDisconnect(input);
+  if (node) {
+    node.connect(destination);
+    input.connect(node);
+  } else {
+    input.connect(destination);
+  }
+}
+
+/**
+ * 把降噪链路插到「输入 → 目的地」之间（或摘掉）。
+ * 返回实际用于连接的终点节点：降噪开 → worklet；关 → 输入本身。
+ *
+ * 【先建后切】是这段代码的全部要点（原实现是反的）：
+ *   原实现先 `input.disconnect()` 再 `await createDenoiseNode()`，而 await 里是
+ *   fetch wasm + addModule，首次可能几百毫秒。这段时间 input 零出边，发布给 SFU
+ *   的轨道是**全程静音**的 —— 对端听到的是长时间静音，不是「一瞬间」。
+ *   现在：新节点在旧链路照常出声的情况下建好，再在同一个同步块里一次改完接线。
+ *
+ * 调用方注意：`input.disconnect()` 是无差别的，会连带断开挂在 input 上的分析器，
+ * 补偿分析器必须在返回值之后再挂。
  */
 export async function attachDenoise(
-  source: MediaStreamAudioSourceNode,
+  input: AudioNode,
   destination: AudioNode,
   engine: DenoiseEngine,
 ): Promise<AudioNode> {
-  await detachDenoise();
+  const previous = activeNode;
 
-  // 关键：清掉 source 上的历史连接。
-  //
-  // ⚠️ 两个必须小心的点：
-  //   1. connect() 是累加语义 —— 不清旧边会造成「原始信号 + 降噪信号」叠加
-  //      （表现为「怎么切降噪都没区别」）
-  //   2. source.disconnect() 是【无差别】断开所有出边 —— 包括自适应补偿的
-  //      分析器。调用方必须在进来之前先摘掉分析器，否则它们会被静默断开，
-  //      而 this.dnPreAnalyser 仍持有引用，后续 tick 读到的是死节点。
-  //
-  // 另外：断开与「重新连上」之间有窗口。中途若 await 卡住或抛错，
-  // source 会处于「零出边」状态 → 对端彻底没声。
-  // 因此下面每个分支都保证最终连上 destination。
-  try {
-    source.disconnect();
-  } catch {
-    /* 没有连接时 disconnect() 会抛，属正常 */
-  }
-
+  // ---- 关闭：不需要异步，直接同步改接线 ----
   if (engine === 'off') {
+    rewire(input, destination, null);
+    destroyNode(previous);
+    activeNode = null;
     activeEngine = 'off';
-    source.connect(destination);
-    return source;
+    return input;
   }
 
   // 预检采样率：worklet 内部对不支持的采样率会直接 throw 且【无法从外部感知】，
   // 结果是一条永远静音的轨道被发布出去（表现为「刚进去没声」）。
-  const rate = source.context.sampleRate;
-  if (!SUPPORTED_SAMPLE_RATES.includes(rate)) {
+  const rate = input.context.sampleRate;
+  if (!supportedRates(engine).includes(rate)) {
     console.error(`[denoise] 采样率 ${rate}Hz 不受 ${engine} 支持，回退直连`);
+    rewire(input, destination, null);
+    destroyNode(previous);
+    activeNode = null;
     activeEngine = 'off';
-    source.connect(destination);
-    return source;
+    return input;
   }
 
-  let node: DenoiseNode | null = null;
-  try {
-    node = await createDenoiseNode(source.context as AudioContext, engine);
-  } catch (err) {
-    console.error('[denoise] 创建降噪节点抛错', err);
-    node = null;
-  }
+  // ---- 建：这一步是异步的，旧链路在此期间继续出声 ----
+  const node = await createDenoiseNode(input.context as AudioContext, engine);
 
   if (!node) {
-    // 初始化失败：直连，不影响出声
     console.error(`[denoise] ${engine} 初始化失败，回退直连`);
+    rewire(input, destination, null);
+    destroyNode(previous);
+    activeNode = null;
     activeEngine = 'off';
-    source.connect(destination);
-    return source;
+    return input;
   }
 
+  // ---- 切：全部同步完成，不存在静音窗 ----
+  rewire(input, destination, node);
+  destroyNode(previous);
   activeNode = node;
   activeEngine = engine;
-  source.connect(node);
-  node.connect(destination);
   return node;
 }
 
-/** 摘掉当前降噪节点（断开所有连接并销毁） */
-export async function detachDenoise(): Promise<void> {
+/**
+ * 摘掉当前降噪节点（断开接线并释放 wasm 状态）。
+ * 调用方负责把输入直接接回目的地（见 audio-mixer 的降级路径）。
+ */
+export function detachDenoise(): void {
   const node = activeNode;
   activeNode = null;
   activeEngine = 'off';
-  if (!node) return;
-  try {
-    node.disconnect();
-  } catch {
-    /* ignore */
-  }
-  node.destroy?.();
+  destroyNode(node);
 }
 
 /** 从设置里读降噪引擎 */
@@ -185,8 +304,26 @@ export function denoiseEngineOf(settings: Settings | undefined): DenoiseEngine {
 }
 
 // ============================================================
-//  A/B 试听：录 3 秒「原始 vs 降噪后」，顺序播放对比
+//  A/B 试听 + 客观量化：录 3 秒「原始 vs 降噪后」
 // ============================================================
+
+/** 量化结果：全部 dBFS，负值。底噪越低越好，语音损失越接近 0 越好 */
+export interface DenoiseProbeMetrics {
+  /** 原始音里的底噪电平 */
+  rawNoiseDb: number;
+  /** 降噪后的底噪电平 */
+  denoisedNoiseDb: number;
+  /** 底噪被压掉多少 dB（越大越好） */
+  noiseReductionDb: number;
+  /** 原始音里的语音电平 */
+  rawSpeechDb: number;
+  /** 降噪后的语音电平 */
+  denoisedSpeechDb: number;
+  /** 语音被削掉多少 dB（正数 = 人声变小了；接近 0 最好） */
+  speechLossDb: number;
+  /** 原始音里「语音 − 底噪」的间隔。太小说明这段录音几乎没说话，前面几个数字不可信 */
+  rawSpeechToNoiseDb: number;
+}
 
 export interface DenoiseProbeResult {
   /** 采样到的原始音（未降噪） */
@@ -195,28 +332,96 @@ export interface DenoiseProbeResult {
   denoisedBlob: Blob | null;
   /** 实际使用的引擎 */
   engine: DenoiseEngine;
+  /** 客观量化；降噪未生效或解码失败时为 null */
+  metrics: DenoiseProbeMetrics | null;
+}
+
+/** 一段录音里「底噪」与「语音」两个电平（dBFS） */
+interface Levels {
+  noiseDb: number;
+  speechDb: number;
+}
+
+const SILENCE_DB = -100;
+
+/**
+ * 用**分位数**估底噪与语音：3 秒里通常既有说话也有停顿，取平均会把两者混在
+ * 一起。这里按 20ms 一帧算 RMS 后排序：
+ *   - 第 10 百分位 → 底噪（最安静的那些帧）
+ *   - 第 90 百分位 → 语音（最响的那些帧）
+ * 粗糙，但对「有没有改善、改善多少」足够用，而且不依赖任何模型。
+ */
+function analyzeLevels(buf: AudioBuffer): Levels {
+  const data = buf.getChannelData(0);
+  const frameLen = Math.max(1, Math.round(buf.sampleRate * 0.02));
+  const frames: number[] = [];
+
+  for (let start = 0; start + frameLen <= data.length; start += frameLen) {
+    let sum = 0;
+    for (let i = 0; i < frameLen; i++) {
+      const v = data[start + i]!;
+      sum += v * v;
+    }
+    frames.push(Math.sqrt(sum / frameLen));
+  }
+
+  if (frames.length < 5) return { noiseDb: SILENCE_DB, speechDb: SILENCE_DB };
+
+  frames.sort((a, b) => a - b);
+  const at = (q: number) =>
+    Math.max(frames[Math.min(frames.length - 1, Math.floor(q * frames.length))]!, 1e-7);
+  return { noiseDb: 20 * Math.log10(at(0.1)), speechDb: 20 * Math.log10(at(0.9)) };
+}
+
+async function decodeLevels(ctx: AudioContext, blob: Blob): Promise<Levels | null> {
+  try {
+    const buf = await ctx.decodeAudioData(await blob.arrayBuffer());
+    return analyzeLevels(buf);
+  } catch {
+    return null;
+  }
+}
+
+function buildMetrics(raw: Levels, denoised: Levels): DenoiseProbeMetrics {
+  return {
+    rawNoiseDb: raw.noiseDb,
+    denoisedNoiseDb: denoised.noiseDb,
+    noiseReductionDb: raw.noiseDb - denoised.noiseDb,
+    rawSpeechDb: raw.speechDb,
+    denoisedSpeechDb: denoised.speechDb,
+    speechLossDb: raw.speechDb - denoised.speechDb,
+    rawSpeechToNoiseDb: raw.speechDb - raw.noiseDb,
+  };
 }
 
 /**
  * 采集 countSeconds 秒的麦克风，同时录下「原始」与「降噪后」两路。
  * 降噪关（或初始化失败）时 denoisedBlob 为 null，只返回原始音。
+ *
+ * ⚠️ 采集参数必须和真实房间一致（同一份 MicInputPrefs）：否则用户试听的是
+ * 一条「房间外」的链路，听到的差别和实际发出去的并不是一回事。原实现在这里
+ * 用了 autoGainControl: false，就是这样一处不一致。
  */
-export async function probeDenoise(
-  countSeconds = 3,
-  engine: DenoiseEngine,
-  onCountdown?: (remaining: number) => void,
-): Promise<DenoiseProbeResult> {
+export async function probeDenoise(opts: {
+  seconds?: number;
+  engine: DenoiseEngine;
+  input: MicInputPrefs;
+  /** 采集设备（与房间里保持一致；不传则用系统默认） */
+  deviceId?: string;
+  onCountdown?: (remaining: number) => void;
+}): Promise<DenoiseProbeResult> {
+  const { engine, input, onCountdown, deviceId } = opts;
+  const countSeconds = opts.seconds ?? 3;
+
+  // 与房间、试麦共用同一份约束（sfu-session 的 micAudioConstraints）
   const stream = await navigator.mediaDevices.getUserMedia({
-    audio: {
-      echoCancellation: true,
-      // 试听对比时不让浏览器 AGC 自动补偿 —— 否则两路音量都被 AGC 拉平，
-      // 听不出降噪模型本身带来的电平差异
-      autoGainControl: false,
-    },
+    audio: micAudioConstraints(input, deviceId),
+    video: false,
   });
 
+  let ctx: AudioContext | null = null;
   try {
-    const ctx = new AudioContext();
+    ctx = new AudioContext();
     await ctx.resume();
     const source = ctx.createMediaStreamSource(stream);
 
@@ -263,13 +468,25 @@ export async function probeDenoise(
       ? new Blob(denoisedChunks, { type: denoisedChunks[0]!.type || mime })
       : null;
 
-    source.disconnect();
-    denoisedNode?.destroy?.();
-    await ctx.close();
+    // 量化：必须在关闭 ctx 之前解码
+    let metrics: DenoiseProbeMetrics | null = null;
+    if (denoisedBlob) {
+      const [rawLevels, denoisedLevels] = await Promise.all([
+        decodeLevels(ctx, rawBlob),
+        decodeLevels(ctx, denoisedBlob),
+      ]);
+      if (rawLevels && denoisedLevels) metrics = buildMetrics(rawLevels, denoisedLevels);
+    }
 
-    return { rawBlob, denoisedBlob, engine: denoisedBlob ? engine : 'off' };
+    source.disconnect();
+    destroyNode(denoisedNode);
+    await ctx.close();
+    ctx = null;
+
+    return { rawBlob, denoisedBlob, engine: denoisedBlob ? engine : 'off', metrics };
   } finally {
     stream.getTracks().forEach((t) => t.stop());
+    if (ctx) void ctx.close().catch(() => undefined);
   }
 }
 

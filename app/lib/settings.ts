@@ -27,6 +27,26 @@ export interface Settings {
     /** off | gtcrn | rnnoise */
     engine: 'off' | 'gtcrn' | 'rnnoise';
   };
+  /**
+   * 浏览器自带的麦克风处理。
+   *
+   * 它们作用在 getUserMedia 那一层，**在**我们的降噪 worklet 之前，
+   * 所以和 GTCRN 是串联关系：两个降噪叠在一起容易出水声/抽吸感，
+   * AGC 又和本地的响度补偿在做同一件事。是否划算只能在具体设备上试听，
+   * 因此做成开关，默认全开（与历史行为一致）。
+   */
+  input?: {
+    /** 浏览器自带降噪（noiseSuppression），默认开 */
+    noiseSuppression?: boolean;
+    /** 浏览器自带自动增益（autoGainControl），默认开 */
+    autoGainControl?: boolean;
+    /** 语音门限：低于阈值不发送，默认关 */
+    gate?: {
+      enabled?: boolean;
+      /** 开门阈值（dBFS，-100..0） */
+      thresholdDb?: number;
+    };
+  };
   /** 在线状态（presence 展示给别人看的） */
   presenceStatus?: 'online' | 'busy' | 'away' | 'invisible';
   /** 是否允许别人邀请我进房间 */
@@ -38,6 +58,58 @@ export interface Settings {
 }
 
 const STORAGE_KEY = 'cf-teamspeed.settings';
+
+/** 浏览器自带麦克风处理的开关键（见 Settings.input） */
+export interface MicInputPrefs {
+  noiseSuppression: boolean;
+  autoGainControl: boolean;
+}
+
+export const DEFAULT_MIC_INPUT_PREFS: MicInputPrefs = {
+  noiseSuppression: true,
+  autoGainControl: true,
+};
+
+/** 从设置里读浏览器自带处理开关（缺省 = 全开，兼容老版本存的设置） */
+export function micInputPrefsOf(settings: Settings | undefined): MicInputPrefs {
+  return {
+    noiseSuppression: settings?.input?.noiseSuppression !== false,
+    autoGainControl: settings?.input?.autoGainControl !== false,
+  };
+}
+
+/**
+ * 语音门限偏好。
+ *
+ * 语义：门检测电平**低于阈值**时整段不发送（增益归零）；
+ * 高于阈值时逐样本原样通过（增益精确等于 1），所以它不会改变说话的音量。
+ *
+ * 默认关 —— 它会在你不说话时把麦克风彻底切断，是个有存在感的开关，
+ * 不该由我们替用户默认打开。
+ */
+export interface VoiceGatePrefs {
+  enabled: boolean;
+  /** 阈值（dBFS，-100..0）。越接近 0 越激进（更容易切断） */
+  thresholdDb: number;
+}
+
+export const DEFAULT_VOICE_GATE: VoiceGatePrefs = {
+  enabled: false,
+  /** -45dBFS：比常见说话电平低一截，先保证不误伤说话，再由用户按电平表收紧 */
+  thresholdDb: -45,
+};
+
+export function voiceGatePrefsOf(settings: Settings | undefined): VoiceGatePrefs {
+  const g = settings?.input?.gate;
+  const raw = g?.thresholdDb;
+  return {
+    enabled: g?.enabled === true,
+    thresholdDb:
+      typeof raw === 'number' && Number.isFinite(raw)
+        ? Math.min(0, Math.max(-100, raw))
+        : DEFAULT_VOICE_GATE.thresholdDb,
+  };
+}
 
 declare global {
   interface Window {
@@ -75,6 +147,7 @@ export function loadSettings(): Settings {
       volumes: parsed.volumes,
       soundEffects: parsed.soundEffects,
       denoise: parsed.denoise,
+      input: parsed.input,
       presenceStatus: parsed.presenceStatus,
       invitable: parsed.invitable,
       inputDeviceId: parsed.inputDeviceId,

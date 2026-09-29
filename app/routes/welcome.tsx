@@ -2,6 +2,7 @@ import { useNavigate, useOutletContext } from 'react-router';
 import { DoorOpen, Headphones, Plus, RefreshCw, Users } from 'lucide-react';
 
 import { Avatar } from '~/components/Avatar';
+import { PrejoinAudio } from '~/components/PrejoinAudio';
 import { cn } from '~/lib/utils';
 import type { ShellContext } from '~/routes/app-shell';
 
@@ -9,10 +10,18 @@ export function meta() {
   return [{ title: '游戏语音室' }];
 }
 
-/** 未选择房间时的中间栏：房间总览。 */
+/** 未选择房间时的中间栏：音频检查 + 房间总览。 */
 export default function Welcome() {
-  const { profile, rooms, refreshRooms, openCreateRoom } =
-    useOutletContext<ShellContext>();
+  const {
+    profile,
+    rooms,
+    refreshRooms,
+    openCreateRoom,
+    denoise,
+    setDenoise,
+    notify,
+    openSettings,
+  } = useOutletContext<ShellContext>();
   const navigate = useNavigate();
 
   const live = rooms.filter((r) => r.memberCount > 0);
@@ -42,6 +51,16 @@ export default function Welcome() {
           </button>
         </div>
       </header>
+
+      {/* 进房前先把麦克风和降噪调好 —— 进房之后再调，对端已经听到问题了 */}
+      <section className="px-6 pb-6 sm:px-8">
+        <PrejoinAudio
+          denoise={denoise}
+          onDenoiseChange={setDenoise}
+          notify={notify}
+          onOpenFullSettings={() => openSettings('audio')}
+        />
+      </section>
 
       <section className="flex flex-col gap-3 px-6 pb-10 sm:px-8">
         <div className="flex items-center justify-between">

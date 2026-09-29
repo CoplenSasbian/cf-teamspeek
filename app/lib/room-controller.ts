@@ -3,7 +3,7 @@ import { audioMixer } from './audio-mixer';
 import { roomsApi, rtcApi, getBaseUrl } from './api';
 import { playSound } from './sound';
 import { denoiseEngineOf, type DenoiseEngine } from './denoise';
-import { loadSettings } from './settings';
+import { loadSettings, micInputPrefsOf, voiceGatePrefsOf } from './settings';
 import { HEARTBEAT_INTERVAL_MS } from '@shared/constants';
 import type { RoomEvent, RoomMember, RoomSnapshot } from '@shared/types';
 
@@ -136,7 +136,12 @@ export class RoomController {
     // 优化：getUserMedia 与 join 无依赖，并行发起 —— getUserMedia 通常 100-500ms，
     // 串行时这段时间是纯等待。
     const joinPromise = roomsApi.join(this.roomId);
-    const micPromise = captureMicrophone()
+    // 采集用用户选定的设备；设备已不可用时 captureMicrophone 会自动回退默认设备
+    const micConfig = loadSettings();
+    const micPromise = captureMicrophone(
+      micInputPrefsOf(micConfig),
+      micConfig.inputDeviceId || undefined,
+    )
       .then((r) => r.stream)
       .catch((err: unknown) => {
         this.events.onError(
@@ -174,8 +179,14 @@ export class RoomController {
     const publishTask = (async () => {
       if (!this.localStream) return;
       // 降噪引擎从本地设置读取（设置面板切换后，下次进房 / 手动重连生效）
-      const denoise = denoiseEngineOf(loadSettings());
-      const processed = await audioMixer.createMicPipeline(this.localStream, this.uid, denoise);
+      const cfg = loadSettings();
+      const denoise = denoiseEngineOf(cfg);
+      const processed = await audioMixer.createMicPipeline(
+        this.localStream,
+        this.uid,
+        denoise,
+        voiceGatePrefsOf(cfg),
+      );
       if (this.stopped) return;
       this.publishTrack = processed ?? this.localStream.getAudioTracks()[0] ?? null;
       if (this.publishTrack) await this.publish();
@@ -184,6 +195,8 @@ export class RoomController {
         // 录制音量链路没建起来（多半是 AudioContext 还没被手势解锁）：
         // 先用原始轨道保证「一定有声」，等首次交互后再重建管线并重发一次。
         this.bindMicUpgradeRetry();
+      } else {
+        this.prewarmLikelyEngine(denoise);
       }
     })();
 
@@ -366,6 +379,22 @@ export class RoomController {
   }
 
   /**
+   * 后台预热「最可能被切到」的降噪引擎。
+   *
+   * 最常见的路径是：进房时降噪是关的 → 觉得吵 → 在设置里打开 GTCRN。
+   * 提前把 worklet 模块与 wasm 拉进缓存，那次切换就只剩接线，不会出现
+   * 几百毫秒的加载停顿。延后几秒再拉，避免和发布抢带宽。
+   */
+  private prewarmLikelyEngine(current: DenoiseEngine): void {
+    if (typeof window === 'undefined') return;
+    const target: DenoiseEngine = current === 'gtcrn' ? 'off' : 'gtcrn';
+    if (target === 'off') return;
+    setTimeout(() => {
+      if (!this.stopped) void audioMixer.prewarmDenoise(target);
+    }, 3000);
+  }
+
+  /**
    * 音频链路就绪后重建麦克风增益链路，并重发轨道。
    * 发布中的轨道无法原地替换，只能换一条重发——代价是一次短暂的音频中断，
    * 换来「录制音量」从此可用。
@@ -373,7 +402,17 @@ export class RoomController {
   private async upgradeMicPipeline(): Promise<void> {
     if (this.stopped || !this.localStream) return;
 
-    const processed = await audioMixer.createMicPipeline(this.localStream, this.uid);
+    // 走的是和首次建管线同一条路径：降噪引擎与语音门限必须一起带上。
+    // （原实现这里没传引擎，于是「AudioContext 晚解锁 → 重建管线」会把用户
+    // 已经开好的降噪悄悄丢掉，界面却还显示开着。）
+    const cfg = loadSettings();
+    const denoise = denoiseEngineOf(cfg);
+    const processed = await audioMixer.createMicPipeline(
+      this.localStream,
+      this.uid,
+      denoise,
+      voiceGatePrefsOf(cfg),
+    );
     if (!processed) return;
 
     this.publishTrack = processed;

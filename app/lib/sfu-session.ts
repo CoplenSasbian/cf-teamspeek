@@ -1,4 +1,9 @@
 import { rtcApi } from './api';
+import {
+  DEFAULT_MIC_INPUT_PREFS,
+  saveSettings,
+  type MicInputPrefs,
+} from './settings';
 import { STUN_SERVERS } from '@shared/constants';
 
 /**
@@ -316,27 +321,97 @@ export class SfuSession {
 }
 
 /**
+ * 麦克风采集约束。
+ *
+ * 房间采集、进房前试麦、A/B 试听三处**必须共用这一份** ——
+ * 否则用户试听到的声音和真正发出去的不是同一条链路（这个坑踩过一次：
+ * 试听里偷偷用了 autoGainControl: false）。
+ */
+export function micAudioConstraints(
+  prefs: MicInputPrefs = DEFAULT_MIC_INPUT_PREFS,
+  deviceId?: string,
+): MediaTrackConstraints {
+  const audio: MediaTrackConstraints = {
+    echoCancellation: true,
+    noiseSuppression: prefs.noiseSuppression,
+    autoGainControl: prefs.autoGainControl,
+    channelCount: 1,
+  };
+  // 指定设备用 exact：选错了要立刻报错，而不是悄悄换回默认设备
+  if (deviceId) audio.deviceId = { exact: deviceId };
+  return audio;
+}
+
+/** 设备没了（拔了/换机器/权限描述符变了）会抛的几种错 */
+function isDeviceUnavailable(err: unknown): boolean {
+  const name = (err as { name?: string } | null)?.name;
+  return name === 'OverconstrainedError' || name === 'NotFoundError' || name === 'DevicesNotFoundError';
+}
+
+/**
  * 发布前的媒体采集。
  * 音频参数偏向语音优化：回声消除 + 降噪 + 自动增益 + 单声道。
+ *
+ * 回声消除始终开启（关掉会直接产生回声，没有取舍空间）；
+ * 浏览器自带的降噪与自动增益可由设置面板关闭 —— 它们和后面的
+ * GTCRN/RNNoise worklet 是串联的，是否叠加划算取决于设备与环境。
  */
-export async function captureMicrophone(): Promise<{
+export async function captureMicrophone(
+  prefs: MicInputPrefs = DEFAULT_MIC_INPUT_PREFS,
+  deviceId?: string,
+): Promise<{
   stream: MediaStream;
   track: MediaStreamTrack;
 }> {
-  const stream = await navigator.mediaDevices.getUserMedia({
-    audio: {
-      echoCancellation: true,
-      noiseSuppression: true,
-      autoGainControl: true,
-      channelCount: 1,
-    },
-    video: false,
-  });
+  let stream: MediaStream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: micAudioConstraints(prefs, deviceId),
+      video: false,
+    });
+  } catch (err) {
+    if (!deviceId || !isDeviceUnavailable(err)) throw err;
+    // 存下来的首选设备已经不可用（拔了耳机 / 换了电脑）。
+    // 必须退回默认设备：否则用户会莫名其妙「以只听模式进入」，而且永远不知道为什么。
+    console.warn('[mic] 首选输入设备不可用，回退默认设备，并清掉这个设置', err);
+    saveSettings({ inputDeviceId: undefined });
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: micAudioConstraints(prefs),
+      video: false,
+    });
+  }
 
   const track = stream.getAudioTracks()[0];
   if (!track) throw new Error('未获取到音频轨道');
 
   return { stream, track };
+}
+
+/**
+ * 在**已存在**的采集轨上切换浏览器自带处理（设置面板实时切换用）。
+ *
+ * 这三个布尔量都是 MediaStreamTrack 的可约束属性，Chrome 支持热改，
+ * 但不是所有浏览器都支持 `applyConstraints` 改它们 —— 所以必须用
+ * `getSettings()` 回读确认，返回 false 时调用方要说「下次进房生效」，
+ * 不能假设改成功了。
+ */
+export async function applyMicInputConstraints(
+  track: MediaStreamTrack,
+  prefs: MicInputPrefs,
+): Promise<boolean> {
+  try {
+    await track.applyConstraints({
+      noiseSuppression: prefs.noiseSuppression,
+      autoGainControl: prefs.autoGainControl,
+    });
+  } catch {
+    return false;
+  }
+  const applied = track.getSettings();
+  return (
+    applied.noiseSuppression === prefs.noiseSuppression &&
+    applied.autoGainControl === prefs.autoGainControl
+  );
 }
 
 /**

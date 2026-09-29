@@ -303,6 +303,18 @@ export default function RoomPage() {
           </div>
         )}
 
+        {volumes.denoiseFailed && (
+          <div className="mb-4 flex items-start gap-2 rounded-2xl border border-warn/40 bg-warn/10 px-4 py-3 text-xs text-ink-2">
+            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-warn" />
+            <span>
+              降噪节点<b className="text-ink">没有输出</b>
+              （模型没能在工作线程里初始化），已自动回退成
+              <b className="text-ink">发送原始麦克风</b>
+              。声音本身是正常的，但降噪没有生效 —— 换个引擎，或退出房间重进可重新尝试。
+            </span>
+          </div>
+        )}
+
         <RoomStagePlaceholder />
       </div>
 
