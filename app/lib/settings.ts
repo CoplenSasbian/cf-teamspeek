@@ -9,6 +9,23 @@ export interface Settings {
   key: string;
   nickname: string;
   avatarId: string | null;
+  /**
+   * 会话 token（Bearer）。
+   *
+   * 浏览器端本来靠 HttpOnly Cookie 就够了，这里再存一份的原因：
+   * 服务端支持「Cookie 与 Bearer 并存」，而 Bearer 是**跨客户端通用**的形态。
+   * 网页端也走同一条路，可以保证「网页能跑 = 别的客户端也能跑」，
+   * 少一类只在浏览器里出现的诡异问题（比如 Safari 的 ITP 清掉 cookie）。
+   *
+   * 代价：token 落在 localStorage 里，XSS 能读到（原本 HttpOnly 能挡住）。
+   * 这是本项目愿意接受的取舍 —— 单个部署、私人使用，且同时保留 cookie 通路，
+   * 真被清了也还能继续用。
+   */
+  sessionToken?: string;
+  /** token 绝对过期时间（Unix 秒），用于提前续期 */
+  sessionExpiresAt?: number;
+  /** 会话绝对上限（Unix 秒），到点必须重新登录 */
+  sessionHardExpiresAt?: number;
   /** 音量偏好（按 uid 记住每个人，重启浏览器仍在） */
   volumes?: {
     /** 自己的录制音量 */
@@ -24,8 +41,8 @@ export interface Settings {
   soundEffects?: boolean;
   /** 麦克风降噪（浏览器端 Web Audio 降噪），默认关 */
   denoise?: {
-    /** off | gtcrn | rnnoise */
-    engine: 'off' | 'gtcrn' | 'rnnoise';
+    /** off | gtcrn | rnnoise | dfn3 */
+    engine: 'off' | 'gtcrn' | 'rnnoise' | 'dfn3';
   };
   /**
    * 浏览器自带的麦克风处理。
@@ -144,6 +161,9 @@ export function loadSettings(): Settings {
       key: parsed.key ?? '',
       nickname: parsed.nickname ?? '',
       avatarId: parsed.avatarId ?? null,
+      sessionToken: parsed.sessionToken,
+      sessionExpiresAt: parsed.sessionExpiresAt,
+      sessionHardExpiresAt: parsed.sessionHardExpiresAt,
       volumes: parsed.volumes,
       soundEffects: parsed.soundEffects,
       denoise: parsed.denoise,
@@ -169,6 +189,43 @@ export function saveSettings(settings: Partial<Settings>): Settings {
 export function clearSettings(): void {
   if (typeof window === 'undefined') return;
   window.localStorage.removeItem(STORAGE_KEY);
+}
+
+// ============================================================
+//  会话 token
+// ============================================================
+
+/** 记下服务端新签发的 token 与到期时间 */
+export function saveSession(
+  token: string,
+  expiresAt: number,
+  hardExpiresAt?: number,
+): void {
+  saveSettings({
+    sessionToken: token,
+    sessionExpiresAt: expiresAt,
+    ...(hardExpiresAt !== undefined ? { sessionHardExpiresAt: hardExpiresAt } : {}),
+  });
+}
+
+/** 读当前 token（没有则 null） */
+export function getSessionToken(): string | null {
+  const s = loadSettings();
+  return s.sessionToken ?? null;
+}
+
+/**
+ * 清掉会话凭据（登出 / 会话到期）。
+ * 刻意保留 baseUrl / nickname / key，方便用户直接重新登录。
+ */
+export function clearSession(): void {
+  if (typeof window === 'undefined') return;
+  const current = loadSettings();
+  const next: Settings = { ...current };
+  delete next.sessionToken;
+  delete next.sessionExpiresAt;
+  delete next.sessionHardExpiresAt;
+  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
 }
 
 // ============================================================

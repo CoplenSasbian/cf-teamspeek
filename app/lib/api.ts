@@ -1,10 +1,21 @@
-import type { ApiResult } from '@shared/types';
+import type { ApiResult, ClientConfig, SessionResult, WsTicket } from '@shared/types';
+import { ErrorCode } from '@shared/types';
+import { clearSession, getSessionToken, saveSession } from './settings';
 
 /**
  * 后端 API 客户端。
- * baseUrl 由设置决定；会话靠 HttpOnly Cookie 自动携带。
+ *
+ * 两套凭据同时使用，服务端 Bearer 优先：
+ *   - HttpOnly Cookie：浏览器自动携带，前端无需操心（同源）
+ *   - `Authorization: Bearer`：跨客户端通用形态，原生 / 脚本 / 第三方网页都用它
+ *
+ * 网页端也主动带 Bearer，是为了让「网页能跑」等价于「别的客户端也能跑」——
+ * 凡是只有 cookie 才能跑通的路径，都属于需要在服务端修掉的缺陷。
  */
 let baseUrl = '';
+
+/** 会话到期时的全局回调（由应用外壳注册，用于跳回登录页） */
+let onSessionExpired: (() => void) | null = null;
 
 export function setBaseUrl(url: string): void {
   baseUrl = url.replace(/\/$/, '');
@@ -12,6 +23,11 @@ export function setBaseUrl(url: string): void {
 
 export function getBaseUrl(): string {
   return baseUrl;
+}
+
+/** 注册会话失效回调（401 + SESSION_EXPIRED / UNAUTHORIZED 时触发） */
+export function setSessionExpiredHandler(handler: (() => void) | null): void {
+  onSessionExpired = handler;
 }
 
 export class ApiError extends Error {
@@ -23,19 +39,62 @@ export class ApiError extends Error {
     super(message);
     this.name = 'ApiError';
   }
+
+  /** 会话不可用（需要重新登录），与「这个请求本身不合法」区分开 */
+  get isAuthFailure(): boolean {
+    return this.status === 401;
+  }
+
+  /** token 寿命到顶，必须重新用 key 登录（而非重试） */
+  get isSessionExpired(): boolean {
+    return this.code === ErrorCode.SESSION_EXPIRED;
+  }
 }
 
-async function request<T>(
-  path: string,
-  init: RequestInit = {},
-): Promise<T> {
+/**
+ * 从响应里吸收服务端滚动续期下发的 token。
+ *
+ * 两条来源：
+ *   1. 响应体里的 `token`（登录 / refresh / 改资料）
+ *   2. `X-Refreshed-Token` 响应头（任意鉴权请求都可能顺带续期）
+ */
+function absorbToken(res: Response, body: unknown): void {
+  const header = res.headers.get('X-Refreshed-Token');
+  const fromBody =
+    body && typeof body === 'object' && 'data' in body
+      ? ((body as { data?: { token?: unknown; expiresAt?: unknown; sessionExpiresAt?: unknown } })
+          .data ?? null)
+      : null;
+
+  const bodyToken = typeof fromBody?.token === 'string' ? fromBody.token : null;
+  const expiresAt = typeof fromBody?.expiresAt === 'number' ? fromBody.expiresAt : undefined;
+  const hardExpiresAt =
+    typeof fromBody?.sessionExpiresAt === 'number' ? fromBody.sessionExpiresAt : undefined;
+
+  if (bodyToken && expiresAt !== undefined) {
+    saveSession(bodyToken, expiresAt, hardExpiresAt);
+    return;
+  }
+
+  if (header) {
+    // 只有响应头：到期时间按滚动窗口粗估，避免把本地记录写小导致反复续期
+    const fallbackExpiry = Math.floor(Date.now() / 1000) + 12 * 3600;
+    saveSession(header, fallbackExpiry, hardExpiresAt);
+  }
+}
+
+async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const token = getSessionToken();
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...(init.headers as Record<string, string> | undefined),
+  };
+  if (token) headers.Authorization = `Bearer ${token}`;
+
   const res = await fetch(`${baseUrl}${path}`, {
     ...init,
-    credentials: 'include', // 带上 HttpOnly Cookie
-    headers: {
-      'Content-Type': 'application/json',
-      ...(init.headers ?? {}),
-    },
+    credentials: 'include', // 同时带上 HttpOnly Cookie（同源场景）
+    headers,
   });
 
   let body: ApiResult<T> | null = null;
@@ -45,9 +104,22 @@ async function request<T>(
     /* 非 JSON 响应 */
   }
 
+  absorbToken(res, body);
+
   if (!res.ok || !body || body.ok !== true) {
-    const message = body && body.ok === false ? body.error : `请求失败（${res.status}）`;
-    const code = body && body.ok === false ? body.code : undefined;
+    const failure = body && body.ok === false ? body : null;
+    const code = failure?.code;
+    const message =
+      failure?.error ??
+      (res.status === 0 ? '无法连接服务器' : `请求失败（${res.status}）`);
+
+    // 会话不可用：清掉本地凭据并通知外壳跳登录页。
+    // 注意只有 401 才算 —— 403（权限不足）不该把人踢下线。
+    if (res.status === 401) {
+      clearSession();
+      onSessionExpired?.();
+    }
+
     throw new ApiError(message, code, res.status);
   }
 
@@ -67,27 +139,7 @@ export const api = {
 //  具体接口
 // ------------------------------------------------------------
 
-export interface ClientConfig {
-  appName: string;
-  turnstileSiteKey: string;
-  adminPath: string;
-  maxRoomMembers: number;
-  e2eeEnabled: boolean;
-  e2eeFallback: boolean;
-  audioBitrateKbps: number;
-}
-
-export interface LoginResult {
-  token: string;
-  role: 'guest' | 'admin';
-  profile: {
-    uid: string;
-    nickname: string;
-    role: 'guest' | 'admin';
-    avatarId: string | null;
-    avatarUrl: string | null;
-  };
-}
+export type { ClientConfig } from '@shared/types';
 
 export const authApi = {
   config: () => api.get<ClientConfig>('/api/auth/config'),
@@ -96,13 +148,24 @@ export const authApi = {
     nickname: string;
     avatarId?: string | null;
     turnstileToken?: string | null;
-  }) => api.post<LoginResult>('/api/auth/login', body),
-  me: () => api.get<{ profile: LoginResult['profile'] }>('/api/auth/me'),
+  }) => api.post<SessionResult>('/api/auth/login', body),
+  /** 显式续期（长连接客户端建议定时调用） */
+  refresh: () => api.post<SessionResult>('/api/auth/refresh', {}),
+  me: () =>
+    api.get<{
+      profile: SessionResult['profile'];
+      authMethod: 'cookie' | 'bearer';
+      expiresAt: number | null;
+      sessionExpiresAt: number;
+    }>('/api/auth/me'),
   updateMe: (body: {
     nickname?: string;
     avatarId?: string | null;
     avatarDataUrl?: string | null;
-  }) => api.patch<{ profile: LoginResult['profile']; token: string }>('/api/auth/me', body),
+  }) => api.patch<{ profile: SessionResult['profile']; expiresAt: number; token: string }>(
+    '/api/auth/me',
+    body,
+  ),
   logout: () => api.post<{ loggedOut: boolean }>('/api/auth/logout'),
 };
 
@@ -131,16 +194,28 @@ export const roomsApi = {
     api.post<{ version: number; reaped: number }>(`/api/rooms/${id}/heartbeat`, { roomId: id }),
   mute: (id: string, muted: boolean) =>
     api.post<{ muted: boolean }>(`/api/rooms/${id}/mute`, { muted }),
+  /**
+   * 领 WebSocket 握手票据。
+   *
+   * WebSocket API 无法自定义请求头，所以不能直接带 Bearer；
+   * 必须先用普通 HTTP 领一张一次性票据再连。
+   */
+  wsTicket: (id: string) => api.post<WsTicket>(`/api/rooms/${id}/ws-ticket`, {}),
 };
 
 export const presenceApi = {
-  /** 心跳：登记在线状态与当前房间 */
+  /**
+   * 心跳：登记在线状态与当前房间。
+   *
+   * `banned: true` = 已被移出服务器（服务端用成功响应 + 标记，
+   * 避免高频心跳里的 403 被当成网络问题忽略）。
+   */
   heartbeat: (body: {
     roomId?: string | null;
     roomName?: string | null;
     status?: import('@shared/types').PresenceStatus;
     invitable?: boolean;
-  }) => api.post<{ alive: boolean }>('/api/presence/heartbeat', body),
+  }) => api.post<{ alive: boolean; banned?: boolean }>('/api/presence/heartbeat', body),
   /** 轮询：服务器成员快照 + 取走新邀请 */
   poll: () => api.post<import('@shared/types').PresenceSnapshot>('/api/presence/poll', {}),
   /** 主动下线（登出前调用） */
@@ -224,6 +299,13 @@ export const adminApi = {
       `/api/admin/audit?${qs}`,
     );
   },
+  /**
+   * CSV 导出地址。
+   *
+   * 注意：这个 URL 只适合**浏览器直接下载**（靠 cookie 鉴权）。
+   * 其他客户端请改用 `downloadAuditCsv()` 拿文本自己落盘 ——
+   * token 不该出现在 URL 里（会进日志与历史记录）。
+   */
   auditExportUrl: () => `${baseUrl}/api/admin/audit/export`,
   kick: (body: { roomId: string; uid: string; reason?: string }) =>
     api.post<{ ok: boolean }>('/api/admin/kick', body),

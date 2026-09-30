@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { zValidator } from '@hono/zod-validator';
 import { createRoomSchema, heartbeatSchema, updateRoomSchema } from '@shared/schema';
-import { DEFAULT_ROOM_ID, DEFAULT_ROOM_NAME } from '@shared/constants';
+import { DEFAULT_ROOM_ID, DEFAULT_ROOM_NAME, WS_TICKET_TTL_SECONDS } from '@shared/constants';
 import { requireAuth } from '../middleware/auth';
 import { apiRateLimit } from '../middleware/ratelimit';
 import { upsertRoomToD1, touchRoomPeak, deleteRoomFromD1 } from '../lib/db';
@@ -256,7 +256,53 @@ rooms.post('/:id/mute', async (c) => {
   return c.json({ ok: true, data: { muted: body.muted === true } });
 });
 
-/** WebSocket 升级（转发到 RoomDO） */
+/**
+ * 领取 WebSocket 握手票据。
+ *
+ * 这是**跨客户端的关键接口**：WebSocket API 无法自定义请求头，所以
+ * 「先用 HTTP 带 Bearer 领票，再用查询串连 WebSocket」是唯一同时适用于
+ * 浏览器 / 原生 App / CLI / 另一个域名网页的方案。
+ *
+ * 返回里直接给出拼好的 `wsUrl`，客户端不必自己处理协议转换与编码。
+ * 若客户端已经自己知道服务器地址，也可以用 `ticket` 字段自行拼接
+ * （查询串固定为 `?ticket=<ticket>`）。
+ */
+rooms.post('/:id/ws-ticket', async (c) => {
+  const user = c.get('user');
+  const id = c.req.param('id') ?? '';
+
+  const stub = c.env.ROOM_DO.get(c.env.ROOM_DO.idFromName(id));
+  const ticket = await stub.issueWsTicket({
+    uid: user.uid,
+    ttlSeconds: WS_TICKET_TTL_SECONDS,
+  });
+
+  // 用请求自身的 host/protocol 拼地址：这样同一套代码在 workers.dev、
+  // 自定义域名、本地 localhost 上都能给出正确的 WebSocket URL。
+  const url = new URL(c.req.url);
+  const wsProtocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+  const wsUrl = `${wsProtocol}//${url.host}/api/rooms/${encodeURIComponent(id)}/ws?ticket=${ticket}`;
+
+  return c.json({
+    ok: true,
+    data: {
+      ticket,
+      expiresAt: Math.floor(Date.now() / 1000) + WS_TICKET_TTL_SECONDS,
+      wsUrl,
+    },
+  });
+});
+
+/**
+ * WebSocket 升级（兼容路径：靠 Cookie 鉴权）。
+ *
+ * ⚠️ 这条路径只为「已经在用 Cookie 的老客户端」保留。
+ * 新客户端一律先调 `POST /api/rooms/:id/ws-ticket` 领票，
+ * 再用 `/ws?ticket=...` 连接 —— 那是唯一跨平台可用的方式。
+ *
+ * 之所以还留着它：网页端在 Cookie 有效时少一次往返。
+ * uid 由 Worker 侧从**已校验的会话**里写入查询串，客户端传什么都无效。
+ */
 rooms.get('/:id/ws', async (c) => {
   const user = c.get('user');
   const id = c.req.param('id') ?? '';
@@ -265,6 +311,8 @@ rooms.get('/:id/ws', async (c) => {
   const url = new URL(c.req.url);
   url.pathname = `/room/${id}/ws`;
   url.searchParams.set('uid', user.uid);
+  // 网页端不带 ticket，RoomDO 会退回按 uid 处理（见 RoomDO.fetch）
+  url.searchParams.delete('ticket');
 
   return stub.fetch(new Request(url.toString(), c.req.raw));
 });

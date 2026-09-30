@@ -15,6 +15,7 @@ import {
 import { LevelBar, VolumeSlider } from '~/components/VolumeControl';
 import { audioMixer, MIC_VOLUME_MAX, useMixerVolumes, useSpeakingSet } from '~/lib/audio-mixer';
 import type { DenoiseEngine } from '~/lib/denoise';
+import { denoiseLabel } from '~/components/audio-shared';
 import { cn, formatDuration } from '~/lib/utils';
 
 /**
@@ -297,9 +298,7 @@ export function VoiceStatusPanel({
                           ? '切换中…'
                           : denoise === 'off'
                             ? '降噪：关闭'
-                            : denoise === 'gtcrn'
-                              ? '降噪：GTCRN'
-                              : '降噪：RNNoise'}
+                            : `降噪：${denoiseLabel(denoise)}`}
                       </span>
                       <span className="block text-[10px] leading-snug text-ink-3">
                         {denoise === 'off'
@@ -326,7 +325,7 @@ export function VoiceStatusPanel({
                   title={
                     denoise === 'off'
                       ? '降噪：关闭（点击开启）'
-                      : `降噪：${denoise === 'gtcrn' ? 'GTCRN' : 'RNNoise'}（点击切换）`
+                      : `降噪：${denoiseLabel(denoise)}（点击切换）`
                   }
                   className={cn(
                     'flex h-4 items-center gap-0.5 rounded px-1 text-[9px] font-semibold transition disabled:opacity-60',
@@ -340,7 +339,7 @@ export function VoiceStatusPanel({
                   ) : (
                     <AudioLines className="h-2.5 w-2.5" />
                   )}
-                  {denoise === 'off' ? '关' : denoise === 'gtcrn' ? 'G' : 'R'}
+                  {denoise === 'off' ? '关' : denoiseLabel(denoise)}
                 </button>
               )}
               <span className={cn('min-w-0 truncate', inRoom && 'text-[12px] font-medium text-ink')}>

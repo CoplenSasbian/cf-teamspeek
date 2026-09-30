@@ -54,6 +54,17 @@ SESSION_SECRET=
 
 
 # ------------------------------------------------------------
+# 4.5 管理后台会话签名密钥
+# ------------------------------------------------------------
+# ⚠️ 必须与 SESSION_SECRET 不同 —— 这是「后台 token 与客户端 token 完全隔离」的关键。
+#    泄露 SESSION_SECRET 只能伪造访客会话；泄露这个则后台失守，务必分开保管。
+# 生成：node -e "console.log(crypto.randomUUID())"
+# 生产部署：wrangler secret put ADMIN_SESSION_SECRET
+
+ADMIN_SESSION_SECRET=
+
+
+# ------------------------------------------------------------
 # 5. Cloudflare Turnstile Secret Key（保密）
 # ------------------------------------------------------------
 # 【开发阶段】直接用官方测试 key（总是通过），不需要建 widget：
@@ -111,6 +122,7 @@ CF_ACCOUNT_ID=
 #   wrangler secret put GUEST_KEY
 #   wrangler secret put ADMIN_KEY
 #   wrangler secret put SESSION_SECRET
+#   wrangler secret put ADMIN_SESSION_SECRET   # 与 SESSION_SECRET 必须不同
 #   wrangler secret put TURNSTILE_SECRET_KEY
 #
 # 查看已写入的密钥名（不显示值）：

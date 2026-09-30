@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Activity, Loader2, UserPlus, X } from 'lucide-react';
 
 import { Avatar, AvatarPicker } from '~/components/Avatar';
-import { DENOISE_OPTIONS as DENOISE_OPTIONS_SHARED, dbToPercent, fmtDb } from '~/components/audio-shared';
+import { denoiseLabel, DENOISE_OPTIONS as DENOISE_OPTIONS_SHARED, dbToPercent, fmtDb } from '~/components/audio-shared';
 import { ApiError, authApi } from '~/lib/api';
 import { audioMixer } from '~/lib/audio-mixer';
 import {
@@ -414,13 +414,7 @@ function AudioTab({
     const applied = await applyDenoise(engine);
     setActiveEngine(activeDenoiseEngine());
     if (applied) {
-      notify(
-        engine === 'off'
-          ? '降噪已关闭'
-          : engine === 'gtcrn'
-            ? 'GTCRN 降噪已生效'
-            : 'RNNoise 降噪已生效',
-      );
+      notify(engine === 'off' ? '降噪已关闭' : `${denoiseLabel(engine)} 降噪已生效`);
     } else if (engine !== 'off' && audioMixer.hasMicPipeline()) {
       // 在房间里但没切成功：模型没能起来，已经回退成原始麦克风。
       // 不能沿用「下次进房生效」那句话 —— 用户会以为现在已经在降噪了。
@@ -656,7 +650,7 @@ function AudioTab({
             </>
           ) : (
             <>
-              当前生效：<b className="text-ink-2">{activeEngine === 'gtcrn' ? 'GTCRN' : 'RNNoise'}</b>
+              当前生效：<b className="text-ink-2">{denoiseLabel(activeEngine)}</b>
               。播放音效、说话光圈与电平条展示的都是降噪后的声音。
             </>
           )}

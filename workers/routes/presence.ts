@@ -26,10 +26,14 @@ presence.post('/heartbeat', zValidator('json', presenceHeartbeatSchema), async (
     return c.json({ ok: false, error: '用户不存在', code: 'UNAUTHORIZED' }, 401);
   }
 
-  // 被踢出服务器的用户不再登记在线，客户端收到 BANNED 后会自行登出
+  // 被踢出服务器的用户不再登记在线。客户端据此清理本地会话并登出。
+  //
+  // 这里返回**成功响应 + banned 标记**，而不是只抛 403：
+  // 心跳是高频请求，若统一抛错，客户端很容易把它当成「网络抖动」忽略掉，
+  // 于是被踢的人会一直卡在界面里。显式标记让任何客户端都能可靠处理。
   const adminStub = c.env.ADMIN_DO.get(c.env.ADMIN_DO.idFromName('global'));
   if (await adminStub.isBanned({ nickname: profile.nickname, ipHash: c.get('ipHash') })) {
-    return c.json({ ok: false, error: '你已被移出本服务器', code: 'BANNED' }, 403);
+    return c.json({ ok: true, data: { alive: false, banned: true } });
   }
 
   const stub = c.env.PRESENCE_DO.get(c.env.PRESENCE_DO.idFromName('global'));
@@ -45,7 +49,7 @@ presence.post('/heartbeat', zValidator('json', presenceHeartbeatSchema), async (
     invitable,
   });
 
-  return c.json({ ok: true, data: { alive: true } });
+  return c.json({ ok: true, data: { alive: true, banned: false } });
 });
 
 /** 轮询：服务器成员快照 + 取走新邀请 */

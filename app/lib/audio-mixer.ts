@@ -1,6 +1,6 @@
 import { useEffect, useState, useSyncExternalStore } from 'react';
 
-import { attachDenoise, DENOISE_LATENCY_SAMPLES, detachDenoise, prewarmDenoise, type DenoiseEngine } from './denoise';
+import { attachDenoise, denoiseLatencySamples, detachDenoise, prewarmDenoise, type DenoiseEngine } from './denoise';
 import { applyMicInputConstraints } from './sfu-session';
 import {
   loadSettings,
@@ -451,7 +451,7 @@ class AudioMixer {
 
       // 降噪生效时启动自适应补偿（对比 worklet 前后的语音电平，动态对齐响度）
       if (this.micDenoise && entry !== highpass) {
-        this.attachCompensationAnalysers(ctx, highpass, entry);
+        this.attachCompensationAnalysers(ctx, highpass, entry, denoise);
       }
 
       const outTrack = dest.stream.getAudioTracks()[0] ?? null;
@@ -515,7 +515,7 @@ class AudioMixer {
     this.dnNoiseFloorDb = -100;
     this.dnDeadTicks = 0;
 
-    if (this.micDenoise) this.attachCompensationAnalysers(ctx, input, entry);
+    if (this.micDenoise) this.attachCompensationAnalysers(ctx, input, entry, engine);
 
     // 补偿增益跟随引擎状态（自适应循环随后会把它调到合适值）
     const boost = this.micDenoise ? this.makeupGain : 1;
@@ -557,6 +557,7 @@ class AudioMixer {
     ctx: AudioContext,
     pre: AudioNode,
     post: AudioNode,
+    engine: DenoiseEngine = 'gtcrn',
   ): void {
     this.stopDenoiseCompensation();
 
@@ -570,9 +571,11 @@ class AudioMixer {
     const preA = mk();
     const postA = mk();
 
-    // 把「降噪前」这一路整体延迟 worklet 的固有延迟，两路才对得上
+    // 把「降噪前」这一路整体延迟 worklet 的固有延迟，两路才对得上。
+    // 延迟量**按引擎取**：DFN3 是 1024 样本，gtcrn/rnnoise 是 640。
+    // 用错值会让比值在语音上乱跳（两路比的是相差十几毫秒的两段声音）。
     const preDelay = ctx.createDelay(0.1);
-    preDelay.delayTime.value = DENOISE_LATENCY_SAMPLES / ctx.sampleRate;
+    preDelay.delayTime.value = denoiseLatencySamples(engine) / ctx.sampleRate;
 
     // 分析器是死端：只读取电平，不参与出声
     pre.connect(preDelay);

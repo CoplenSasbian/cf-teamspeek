@@ -59,13 +59,17 @@ export function usePresence(opts: {
 
   const heartbeat = useCallback(async () => {
     try {
-      await presenceApi.heartbeat({
+      const result = await presenceApi.heartbeat({
         roomId: roomRef.current.roomId,
         roomName: roomRef.current.roomName,
         status: roomRef.current.status,
         invitable: roomRef.current.invitable,
       });
+      // 被移出服务器：服务端用「成功响应 + banned 标记」告知，
+      // 因为高频心跳里抛 403 很容易被当成网络抖动忽略掉。
+      if (result.banned) onBannedRef.current?.();
     } catch (err) {
+      // 兼容旧服务端的 403 BANNED（或代理改写响应的情况）
       if (err instanceof ApiError && err.code === 'BANNED') {
         onBannedRef.current?.();
         return;

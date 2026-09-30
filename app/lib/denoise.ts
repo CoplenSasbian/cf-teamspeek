@@ -1,25 +1,32 @@
 import type { GtcrnWorkletNode, RnnoiseWorkletNode } from '@sapphi-red/web-noise-suppressor';
+import { createDfn3Node, dfn3Supported, type Dfn3Handle } from './dfn3-engine';
 import { micAudioConstraints } from './sfu-session';
 import type { MicInputPrefs, Settings } from './settings';
 
 /**
- * 麦克风降噪引擎 —— 基于 @sapphi-red/web-noise-suppressor 的 AudioWorklet。
+ * 麦克风降噪引擎。
  *
- * 两种可选引擎：
+ * 三个可选引擎：
  *   - GTCRN  效果更好（ICASSP2024，48K 参数超越 RNNoise），推理稍重
  *   - RNNoise xiph 经典，极轻，效果一般
+ *   - DFN3   DeepFilterNet3（ONNX，浏览器内跑）。**对「说话中打字」的键盘声
+ *            有实质抑制**（实测 −5.6~−7.0dB），而前两个引擎对同时发生的
+ *            非人声基本无效（它们是按「平稳噪声」训练的）。
+ *            代价：延迟 32ms（前两者的降噪延迟是 13.3ms），且首次要下载约 24MB。
  *
  * ⚠️ 本模块（以及依赖它的 audio-mixer）会被 SSR bundle 引入，
  * 因此包的【类】必须用动态 import() 加载 —— 静态 import 会让
  * `class extends AudioWorkletNode` 在 Workers 环境求值时直接崩掉
  * （ReferenceError: AudioWorkletNode is not defined）。
+ * dfn3-engine 内部同理：它的 dfn3Supported() 会访问 globalThis.crossOriginIsolated，
+ * 所以在 SSR 期间只做只读判断，真正的加载走异步。
  *
  * 插入位置：麦克风源 → [高通] → [降噪节点] → 补偿增益 → 软限幅 → 发布。
  * worklet/wasm 资源已复制到 /public（gtcrn-worklet.js / gtcrn.wasm 等），
  * 由构建时脚本保证与 npm 包版本一致。
  */
 
-export type DenoiseEngine = 'off' | 'gtcrn' | 'rnnoise';
+export type DenoiseEngine = 'off' | 'gtcrn' | 'rnnoise' | 'dfn3';
 
 const GTCRN_WORKLET_URL = '/gtcrn-worklet.js';
 const GTCRN_WASM_URL = '/gtcrn.wasm';
@@ -27,10 +34,20 @@ const RNNOISE_WORKLET_URL = '/rnnoise-worklet.js';
 const RNNOISE_WASM_URL = '/rnnoise.wasm';
 const RNNOISE_SIMD_WASM_URL = '/rnnoise_simd.wasm';
 
-type DenoiseNode = GtcrnWorkletNode | RnnoiseWorkletNode;
+/** 两个自带引擎的节点形态：AudioWorkletNode + 可选的 destroy() */
+type DenoiseNode = (GtcrnWorkletNode | RnnoiseWorkletNode) & { destroy?: () => void };
 
-/** 当前已加载的降噪节点（每个 AudioContext 一条链，全局唯一麦克风） */
-let activeNode: DenoiseNode | null = null;
+/**
+ * 统一的降噪节点句柄。
+ *
+ * 前两个引擎是「AudioWorkletNode + destroy()」，DFN3 是
+ * 「AudioWorkletNode + dispose()（还要停 worker）」。这里用一个可选 destroy
+ * 把两者统一 —— 否则 attachDenoise / swapDenoise / 各处的清理逻辑都要分叉。
+ */
+type DenoiseHandle = DenoiseNode | Dfn3Handle;
+
+/** 当前已加载的降噪句柄（每个 AudioContext 一条链，全局唯一麦克风） */
+let activeNode: DenoiseHandle | null = null;
 /** 当前生效的引擎（createDenoiseNode 成功才更新 —— 失败回退时保持 off） */
 let activeEngine: DenoiseEngine = 'off';
 
@@ -48,9 +65,34 @@ let activeEngine: DenoiseEngine = 'off';
  */
 export const DENOISE_LATENCY_SAMPLES = 640;
 
+/**
+ * DFN3 的固有延迟（样本 @48kHz）= 512。
+ *
+ * 512 样本帧的 STFT 前瞻。加上 worklet 里对齐用的那一段干信号延迟
+ * （见 client/dfn3/channel.mjs），**总延迟是 1024 样本 ≈ 21.3ms**；
+ * 再加上模型内部的流水线（实测端到端 32ms，见 scripts/audio-eval/README.md）。
+ *
+ * 自适应补偿要用这个值把「降噪前」那一路对齐 —— 用错值会让比值在语音上乱跳，
+ * 进而让本地音量补偿做出错误的增益调整。
+ */
+export const DFN3_LATENCY_SAMPLES = 1024;
+
+/** 按引擎取固有延迟（样本 @48kHz）。补偿分析器用它对齐干信号。 */
+export function denoiseLatencySamples(engine: DenoiseEngine): number {
+  return engine === 'dfn3' ? DFN3_LATENCY_SAMPLES : DENOISE_LATENCY_SAMPLES;
+}
+
 /** 当前实际生效的降噪引擎（面板展示 / 调试用） */
 export function activeDenoiseEngine(): DenoiseEngine {
   return activeEngine;
+}
+
+/**
+ * DFN3 在当前环境是否可用（不看资产是否已下载，只看浏览器能力）。
+ * 设置面板用它决定要不要把 DFN3 显示为可选。
+ */
+export function dfn3Availability(): { ok: boolean; reason?: string } {
+  return dfn3Supported();
 }
 
 /** 浏览器内动态加载包（SSR 安全：仅客户端会走到这里） */
@@ -135,6 +177,15 @@ function assetsOf(engine: Exclude<DenoiseEngine, 'off'>): { module: string; wasm
  */
 export async function prewarmDenoise(ctx: AudioContext, engine: DenoiseEngine): Promise<void> {
   if (engine === 'off') return;
+
+  // DFN3 刻意**不预热**。
+  //
+  // 它要下载约 24MB（ORT 运行时 + 模型），而「用户可能会切到这个引擎」
+  // 这个概率并不高 —— 为一个可能不发生的选择预先拉 24MB 是明显的浪费，
+  // 尤其对流量敏感的用户。代价是首次切换会等下载完成，所以
+  // createDfn3Node 提供了 onProgress 回调用于给出进度反馈。
+  if (engine === 'dfn3') return;
+
   try {
     const { module, wasm } = assetsOf(engine);
     await Promise.all([ensureModule(ctx, module), fetchWasm(wasm)]);
@@ -149,8 +200,15 @@ export async function prewarmDenoise(ctx: AudioContext, engine: DenoiseEngine): 
 export async function createDenoiseNode(
   ctx: AudioContext,
   engine: DenoiseEngine,
-): Promise<DenoiseNode | null> {
+): Promise<DenoiseHandle | null> {
   if (engine === 'off') return null;
+
+  // DFN3 走完全不同的形态：AudioWorklet + Web Worker + SharedArrayBuffer，
+  // 不是「一个 worklet + 一个 wasm」那种库提供的节点。
+  if (engine === 'dfn3') {
+    const handle = await createDfn3Node(ctx);
+    return handle;
+  }
 
   try {
     const { GtcrnWorkletNode: G, RnnoiseWorkletNode: R } = await loadWorklets();
@@ -179,8 +237,16 @@ const GTCRN_SAMPLE_RATES = [16000, 48000];
  */
 const RNNOISE_SAMPLE_RATES = [48000];
 
+/**
+ * DFN3 只支持 48kHz —— 而且这是**模型内部**的硬约束（ERB 滤波器组按 48k 设计），
+ * 不是可以重采样绕过的。给它 44.1k 会得到完全错误的频谱特征。
+ */
+const DFN3_SAMPLE_RATES = [48000];
+
 function supportedRates(engine: Exclude<DenoiseEngine, 'off'>): number[] {
-  return engine === 'gtcrn' ? GTCRN_SAMPLE_RATES : RNNOISE_SAMPLE_RATES;
+  if (engine === 'gtcrn') return GTCRN_SAMPLE_RATES;
+  if (engine === 'dfn3') return DFN3_SAMPLE_RATES;
+  return RNNOISE_SAMPLE_RATES;
 }
 
 /** 断开节点（本来就没连时 disconnect() 会抛，属正常） */
@@ -192,12 +258,17 @@ function safeDisconnect(node: AudioNode | null): void {
   }
 }
 
-/** 释放 worklet 的 wasm 状态 */
-function destroyNode(node: DenoiseNode | null): void {
+/** 释放 worklet 的 wasm 状态（DFN3 还要顺带停掉推理 worker） */
+function destroyNode(node: DenoiseHandle | null): void {
   if (!node) return;
   safeDisconnect(node);
   try {
-    node.destroy?.();
+    // DFN3 的句柄用 dispose()（内部会 terminate worker）
+    if ('dispose' in node && typeof node.dispose === 'function') {
+      node.dispose();
+      return;
+    }
+    (node as DenoiseNode).destroy?.();
   } catch {
     /* ignore */
   }
@@ -216,7 +287,7 @@ function destroyNode(node: DenoiseNode | null): void {
  * 提交：同一个 JS 任务里的 disconnect + connect 会在同一个量子生效，中间不
  * 存在静音窗；一旦中间插入 await，那个量子就没人喂了。
  */
-function rewire(input: AudioNode, destination: AudioNode, node: DenoiseNode | null): void {
+function rewire(input: AudioNode, destination: AudioNode, node: DenoiseHandle | null): void {
   safeDisconnect(input);
   if (node) {
     node.connect(destination);
@@ -435,7 +506,7 @@ export async function probeDenoise(opts: {
     // 降噪路：插入 worklet 后录
     let denoisedRec: MediaRecorder | null = null;
     const denoisedChunks: Blob[] = [];
-    let denoisedNode: DenoiseNode | null = null;
+    let denoisedNode: DenoiseHandle | null = null;
     let denoisedDest: MediaStreamAudioDestinationNode | null = null;
 
     if (engine !== 'off') {

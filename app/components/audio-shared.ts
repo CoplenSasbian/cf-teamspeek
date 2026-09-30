@@ -26,7 +26,26 @@ export const DENOISE_OPTIONS: Array<{
     short: 'RNNoise',
     hint: '经典轻量方案，效果一般，CPU 占用最低',
   },
+  {
+    value: 'dfn3',
+    label: 'DeepFilterNet3（键盘声克星）',
+    short: 'DFN3',
+    hint: '能压掉「说话时打字」的键盘声（前两者做不到）。代价：延迟 +19ms，首次需下载约 24MB',
+  },
 ];
+
+/**
+ * 取引擎的显示名。
+ *
+ * 存在的理由：引擎名曾在 UI 里被硬编码了**六七处**（三元表达式嵌套），
+ * 每加一个引擎都要挨个改，实际已经漏过（加 DFN3 时又一次漏）。
+ * 统一走这个函数，以后加引擎只改 DENOISE_OPTIONS 一处。
+ */
+export function denoiseLabel(engine: DenoiseEngine, style: 'short' | 'label' = 'short'): string {
+  const opt = DENOISE_OPTIONS.find((o) => o.value === engine);
+  if (!opt) return engine;
+  return style === 'label' ? opt.label : opt.short;
+}
 
 /** 电平表量程（dBFS） */
 export const METER_MIN_DB = -80;

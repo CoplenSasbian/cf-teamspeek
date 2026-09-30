@@ -35,6 +35,11 @@ function getToken(): string | null {
   return window.sessionStorage.getItem(TOKEN_KEY);
 }
 
+function storeToken(token: string): void {
+  if (typeof window === 'undefined') return;
+  window.sessionStorage.setItem(TOKEN_KEY, token);
+}
+
 export function isAdminSignedIn(): boolean {
   return getToken() !== null;
 }
@@ -56,6 +61,11 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     credentials: 'include', // cookie（ct_admin_session）自动带上
     headers,
   });
+
+  // 服务端会滚动续期后台会话：任意请求都可能顺带回一个新 token，收下它。
+  // 不收的话后台会在 4 小时后突然掉线（哪怕一直在操作）。
+  const refreshed = res.headers.get('X-Refreshed-Token');
+  if (refreshed) storeToken(refreshed);
 
   let body: { ok?: boolean; data?: T; error?: string; code?: string } | null = null;
   try {

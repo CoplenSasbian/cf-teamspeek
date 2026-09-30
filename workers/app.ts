@@ -9,6 +9,7 @@ import presenceRoutes from './routes/presence';
 import type { AppEnv, Env } from './env';
 import { flushAuditToD1, flushUsageToD1 } from './lib/db';
 import { createLoadContext } from './lib/context';
+import { corsMiddleware } from './middleware/cors';
 
 
 // DO 类必须从 Worker 入口导出，wrangler 才能绑定
@@ -18,6 +19,19 @@ export { AdminDO } from './durable/AdminDO';
 export { PresenceDO } from './durable/PresenceDO';
 
 const app = new Hono<AppEnv>();
+
+// ------------------------------------------------------------
+//  CORS —— 必须最先注册
+//
+//  作用：让「另一个域名的网页客户端」也能调这套 API。
+//  白名单为空（默认）时行为与以前完全一致：只服务同源页面；
+//  原生客户端（不受 CORS 约束）也不受影响。
+//
+//  放在最前面的原因：浏览器的预检（OPTIONS）请求不带凭据，
+//  如果让它走到鉴权中间件就会被 401 掉，前端只会看到
+//  「CORS 预检失败」而看不到真正原因。
+// ------------------------------------------------------------
+app.use('*', corsMiddleware);
 
 // ------------------------------------------------------------
 //  API 路由

@@ -1,0 +1,41 @@
+# ============================================================
+#  Cloudflare Pages / Workers 静态资源响应头
+#
+#  为什么需要这个文件：DFN3 降噪引擎要在「音频线程（AudioWorklet）」与
+#  「推理线程（Web Worker）」之间传音频，用的是 SharedArrayBuffer。
+#  浏览器只在**跨源隔离**（cross-origin isolated）的页面里才允许
+#  SharedArrayBuffer，而跨源隔离由下面两个头触发。
+#
+#  缺这两个头的表现：`globalThis.crossOriginIsolated === false`，
+#  `new SharedArrayBuffer(...)` 抛错，DFN3 引擎直接不可用
+#  （会回退到 gtcrn/rnnoise，不会崩，但高质量降噪用不了）。
+# ============================================================
+
+/*
+  Cross-Origin-Opener-Policy: same-origin
+  Cross-Origin-Embedder-Policy: require-corp
+
+# ------------------------------------------------------------
+#  降噪模型与 ORT 运行时：内容不变，可以长期缓存
+#  （文件名带版本号时更稳妥；目前按目录整体缓存）
+# ------------------------------------------------------------
+/dfn3/ort/*
+  Cache-Control: public, max-age=31536000, immutable
+
+/dfn3/denoiser_model.onnx
+  Cache-Control: public, max-age=31536000, immutable
+
+/dfn3/initial_states.npz
+  Cache-Control: public, max-age=31536000, immutable
+
+# ------------------------------------------------------------
+#  worklet / worker 脚本：更新频率高，用短缓存 + 重新验证
+# ------------------------------------------------------------
+/dfn3/*.mjs
+  Cache-Control: public, max-age=300, must-revalidate
+
+# ------------------------------------------------------------
+#  其余静态资源
+# ------------------------------------------------------------
+/assets/*
+  Cache-Control: public, max-age=31536000, immutable

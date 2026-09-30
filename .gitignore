@@ -84,3 +84,34 @@ temp/
 # ============================================================
 coverage/
 .nyc_output/
+
+# ============================================================
+# 语音隔离评测台的产物
+#   samples/ 合成样本  models/ 模型权重  都可由脚本重建
+#   out/     处理结果与试听文件
+#   real/    你录的真实音频（个人数据，绝不入库）
+# 保留 README.md 与 *.py
+# ============================================================
+scripts/audio-eval/samples/
+scripts/audio-eval/samples_real/
+scripts/audio-eval/out/
+scripts/audio-eval/out_real/
+scripts/audio-eval/models/
+scripts/audio-eval/real/
+# real/ 里的录音不入库，但那份「怎么录、录完怎么用」的说明要入库
+!scripts/audio-eval/real/README.md
+scripts/audio-eval/js_states.json
+scripts/audio-eval/py_states.json
+scripts/audio-eval/*_err.txt
+__pycache__/
+*.pyc
+
+# ============================================================
+# DFN3 前端资产（由 python tools/prepare_web_assets.py 生成）
+#   ~24.5MB：ORT 运行时 11MB + 模型 12.9MB + 初始状态
+#   脚本化重建，不入库
+# 保留 public/_headers
+# ============================================================
+public/dfn3/denoiser_model.onnx
+public/dfn3/initial_states.npz
+public/dfn3/ort/

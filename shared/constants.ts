@@ -24,11 +24,38 @@ export const RESERVED_NICKNAMES = new Set([
 export const NICKNAME_MIN = 2;
 export const NICKNAME_MAX = 16;
 
-/** 会话 JWT 有效期（小时） */
+/**
+ * 会话 JWT 有效期（小时）—— **滚动续期窗口**。
+ *
+ * 含义：token 签发后 12 小时内有效；只要在有效期内发起过任意鉴权请求，
+ * 服务端就会顺带换发一个新 token（原始签发时间 `iat` 保持不变），
+ * 于是活跃会话自动延长，闲置超过 12 小时才掉线。
+ */
 export const SESSION_TTL_HOURS = 12;
+
+/**
+ * 会话绝对寿命（小时）—— **硬上限，不可续期**。
+ *
+ * 无论多活跃，从首次登录算起最多存活这么久，之后必须重新用 key 登录。
+ * 作用：避免一个泄露的 token 被无限续期成永久通行证。
+ */
+export const SESSION_ABSOLUTE_TTL_HOURS = 24 * 30;
 
 /** 管理后台会话有效期（小时）—— 独立于客户端会话，短一些降低泄露窗口 */
 export const ADMIN_SESSION_TTL_HOURS = 4;
+
+/** 管理后台会话绝对寿命（小时）—— 后台权限大，硬上限给得比客户端短 */
+export const ADMIN_SESSION_ABSOLUTE_TTL_HOURS = 24 * 7;
+
+/**
+ * WebSocket 握手 ticket 有效期（秒）。
+ *
+ * 浏览器与原生客户端的 WebSocket API 都**无法自定义请求头**，
+ * 因此不能直接带 `Authorization: Bearer`。改为：先用 HTTP（可带 Bearer）
+ * 领一张一次性 ticket，再把它放进 WebSocket URL 的查询串里。
+ * 握手是紧接着发生的，所以有效期给得很短。
+ */
+export const WS_TICKET_TTL_SECONDS = 60;
 
 /** 管理后台独立 cookie / 登录路径 */
 export const ADMIN_SESSION_COOKIE = 'ct_admin_session';

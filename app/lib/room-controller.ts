@@ -1,6 +1,6 @@
 import { SfuSession, captureMicrophone } from './sfu-session';
 import { audioMixer } from './audio-mixer';
-import { roomsApi, rtcApi, getBaseUrl } from './api';
+import { roomsApi, rtcApi, ApiError } from './api';
 import { playSound } from './sound';
 import { denoiseEngineOf, type DenoiseEngine } from './denoise';
 import { loadSettings, micInputPrefsOf, voiceGatePrefsOf } from './settings';
@@ -81,6 +81,10 @@ export class RoomController {
   private stopped = false;
   /** join 是否成功过（决定离房时是否发音效） */
   private joinedSuccessfully = false;
+  /** 重连定时器：stop 时要清掉，否则会留下一个永远在重试的定时器 */
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  /** 会话已失效：不再重连 WebSocket（继续重试只会无限 401） */
+  private sessionDead = false;
   private bitrateKbps: number;
   /** 音频链路从降级升级到 Web Audio 后，用它解除监听 */
   private unsubscribeMicUpgrade: (() => void) | null = null;
@@ -174,7 +178,7 @@ export class RoomController {
     //    WebSocket 只是建立连接，更没有依赖。串行时这三段各等各的 RTT，
     //    并行后整段耗时 ≈ 最慢的一段（通常就是发布那条）。
     //    doStart 是 async 任务且下方有 stopped 检查，快速切房间也安全。
-    this.connectWebSocket();
+    void this.connectWebSocket();
 
     const publishTask = (async () => {
       if (!this.localStream) return;
@@ -252,6 +256,8 @@ export class RoomController {
     if (this.pollTimer) clearInterval(this.pollTimer);
     this.heartbeatTimer = null;
     this.pollTimer = null;
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
 
     // 【先】告诉服务端「我走了」。切房间时新房间的 join 紧随其后，
     // leave 放最后会让服务端有一段时间看到你同时在两个房间里。
@@ -532,39 +538,71 @@ export class RoomController {
   //  WebSocket + 心跳
   // ==========================================================
 
-  private connectWebSocket(): void {
-    const base = getBaseUrl().replace(/^http/, 'ws');
-    const url = `${base}/api/rooms/${this.roomId}/ws`;
+  private connectWebSocket(): Promise<void> {
+    if (this.sessionDead || this.stopped) return Promise.resolve();
 
-    try {
-      this.ws = new WebSocket(url);
-    } catch (err) {
-      this.events.onError(err instanceof Error ? err.message : 'WebSocket 连接失败');
-      return;
-    }
-
-    this.ws.addEventListener('message', (event) => {
-      if (typeof event.data !== 'string') return;
-      let payload: RoomEvent;
+    return (async () => {
+      // 先领一次性握手票据。
+      //
+      // 为什么不用 Cookie：WebSocket API 无法自定义请求头，也就没法带
+      // `Authorization: Bearer`。领票这一步走的是普通 HTTP（可以带 Bearer），
+      // 于是网页 / 原生 App / CLI / 第三方网页都能用同一条路。
+      let wsUrl: string;
       try {
-        payload = JSON.parse(event.data) as RoomEvent;
-      } catch {
+        const ticket = await roomsApi.wsTicket(this.roomId);
+        wsUrl = ticket.wsUrl;
+      } catch (err) {
+        if (this.stopped) return;
+        // 401 = 会话没了，重连没有意义
+        if (err instanceof ApiError && err.isAuthFailure) {
+          this.sessionDead = true;
+          return;
+        }
+        this.scheduleReconnect();
         return;
       }
-      void this.handleEvent(payload);
-    });
 
-    this.ws.addEventListener('close', () => {
       if (this.stopped) return;
-      // 3 秒后重连
-      setTimeout(() => {
-        if (!this.stopped) this.connectWebSocket();
-      }, 3000);
-    });
 
-    this.ws.addEventListener('error', () => {
-      /* close 事件会跟着来 */
-    });
+      let socket: WebSocket;
+      try {
+        socket = new WebSocket(wsUrl);
+      } catch (err) {
+        this.events.onError(err instanceof Error ? err.message : 'WebSocket 连接失败');
+        this.scheduleReconnect();
+        return;
+      }
+      this.ws = socket;
+
+      socket.addEventListener('message', (event) => {
+        if (typeof event.data !== 'string') return;
+        let payload: RoomEvent;
+        try {
+          payload = JSON.parse(event.data) as RoomEvent;
+        } catch {
+          return;
+        }
+        void this.handleEvent(payload);
+      });
+
+      socket.addEventListener('close', () => {
+        if (this.ws === socket) this.ws = null;
+        this.scheduleReconnect();
+      });
+
+      socket.addEventListener('error', () => {
+        /* close 事件会跟着来 */
+      });
+    })();
+  }
+
+  /** 3 秒后重连（只会存在一个待触发的重连定时器） */
+  private scheduleReconnect(): void {
+    if (this.stopped || this.sessionDead || this.reconnectTimer) return;
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      void this.connectWebSocket();
+    }, 3000);
   }
 
   private async handleEvent(event: RoomEvent): Promise<void> {

@@ -1,11 +1,16 @@
 import { Hono } from 'hono';
 import { zValidator } from '@hono/zod-validator';
-import { setCookie, deleteCookie } from 'hono/cookie';
+import { deleteCookie, getCookie } from 'hono/cookie';
 import { z } from 'zod';
 import { kickSchema, banSchema, auditQuerySchema } from '@shared/schema';
-import { ADMIN_SESSION_COOKIE, ADMIN_SESSION_TTL_HOURS } from '@shared/constants';
-import { requireAdminSession } from '../middleware/auth';
-import { signAdminSession } from '../lib/jwt';
+import {
+  ADMIN_SESSION_COOKIE,
+  ADMIN_SESSION_TTL_HOURS,
+  ADMIN_SESSION_ABSOLUTE_TTL_HOURS,
+} from '@shared/constants';
+import { ErrorCode } from '@shared/types';
+import { requireAdminSession, writeSessionCookie } from '../middleware/auth';
+import { signAdminSession, signRenewedAdminSession, verifyAdminSession } from '../lib/jwt';
 import { timingSafeEqual, sha256Hex } from '../lib/crypto';
 import { flushAuditToD1, flushUsageToD1, readUsageDaily, queryAudit, pruneAudit, deleteRoomFromD1 } from '../lib/db';
 import type { AppEnv } from '../env';
@@ -58,15 +63,67 @@ admin.post('/auth/login', zValidator('json', adminLoginSchema), async (c) => {
   });
 
   const token = await signAdminSession('admin', c.env.ADMIN_SESSION_SECRET);
-  setCookie(c, ADMIN_SESSION_COOKIE, token, {
-    httpOnly: true,
-    sameSite: 'Strict',
-    secure: new URL(c.req.url).protocol === 'https:',
-    path: '/',
-    maxAge: ADMIN_SESSION_TTL_HOURS * 3600,
-  });
+  // 浏览器用这个 Cookie；脚本 / 原生 App 用响应体里的 token 走 Bearer。
+  // 两条路都通 —— 这正是后台 API 能脱离网页客户端的前提。
+  writeSessionCookie(c, ADMIN_SESSION_COOKIE, token, ADMIN_SESSION_TTL_HOURS * 3600);
 
-  return c.json({ ok: true, data: { token, nickname: 'admin' } });
+  return c.json({
+    ok: true,
+    data: {
+      token,
+      nickname: 'admin',
+      role: 'admin' as const,
+      expiresAt: Math.floor(Date.now() / 1000) + ADMIN_SESSION_TTL_HOURS * 3600,
+      sessionExpiresAt:
+        Math.floor(Date.now() / 1000) + ADMIN_SESSION_ABSOLUTE_TTL_HOURS * 3600,
+    },
+  });
+});
+
+/**
+ * 后台会话续期（跨客户端必需）。
+ *
+ * 客户端可以定时调用它保持后台登录态；超过绝对寿命返回 401 SESSION_EXPIRED。
+ */
+admin.post('/auth/refresh', async (c) => {
+  const header = c.req.header('Authorization');
+  const bearer = header?.startsWith('Bearer ') ? header.slice(7).trim() : null;
+  const token = bearer || getCookie(c, ADMIN_SESSION_COOKIE);
+
+  if (!token) {
+    return c.json({ ok: false, error: '未登录', code: ErrorCode.UNAUTHORIZED }, 401);
+  }
+
+  const session = await verifyAdminSession(token, c.env.ADMIN_SESSION_SECRET);
+  if (!session) {
+    return c.json(
+      { ok: false, error: '后台会话已过期，请重新登录', code: ErrorCode.UNAUTHORIZED },
+      401,
+    );
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  const absoluteLeft = session.issuedAt + ADMIN_SESSION_ABSOLUTE_TTL_HOURS * 3600 - now;
+  if (absoluteLeft <= 60) {
+    return c.json(
+      { ok: false, error: '后台登录状态已到期，请重新登录', code: ErrorCode.SESSION_EXPIRED },
+      401,
+    );
+  }
+
+  const ttl = Math.min(ADMIN_SESSION_TTL_HOURS * 3600, absoluteLeft);
+  const fresh = await signRenewedAdminSession(
+    session.nickname,
+    c.env.ADMIN_SESSION_SECRET,
+    session.issuedAt,
+    ttl,
+  );
+  writeSessionCookie(c, ADMIN_SESSION_COOKIE, fresh, ttl);
+
+  return c.json({
+    ok: true,
+    data: { token: fresh, nickname: session.nickname, expiresAt: now + ttl },
+  });
 });
 
 admin.post('/auth/logout', (c) => {

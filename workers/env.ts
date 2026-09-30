@@ -30,6 +30,18 @@ export interface Env {
   AUDIO_BITRATE_KBPS: string;
   USAGE_FLUSH_INTERVAL_MINUTES: string;
   AUDIT_RETENTION_DAYS: string;
+  /**
+   * 跨域白名单，逗号分隔的完整 origin（如 `https://a.com,https://b.com`）。
+   * 留空 = 只服务同源页面 + 不受 CORS 约束的原生客户端。
+   * 写 `*` = 放行任意源，但**不允许携带 Cookie**（只能用 Bearer）。
+   */
+  ALLOWED_ORIGINS?: string;
+  /**
+   * 管理员登录是否强制人机验证。默认 `true`。
+   * 设为 `false` 可让纯原生客户端（无法渲染 Turnstile widget）直接登录 ——
+   * 代价是后台登录只剩「key + 失败锁定」这一层防护。
+   */
+  ADMIN_LOGIN_TURNSTILE?: string;
 
   // ---- Bindings ----
   DB: D1Database;
@@ -47,7 +59,13 @@ export interface Variables {
     role: 'guest' | 'admin';
     iat?: number;
     exp?: number;
+    /** 原始签发时间（秒）。滚动续期时保持不变，用于计算会话绝对寿命 */
+    issuedAt?: number;
+    /** token 绝对过期时间（秒） */
+    expiresAt?: number;
   };
+  /** 本次请求用的是 Cookie 还是 Bearer（第三方客户端自检用） */
+  authMethod?: 'cookie' | 'bearer';
   /** 客户端 IP 的哈希（隐私）与前缀 */
   ipHash: string;
   ipPrefix: string;

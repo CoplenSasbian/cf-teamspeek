@@ -609,7 +609,17 @@ window.__CF_VOICE_BASE_URL__ = 'https://your-worker.workers.dev';
 
 所有写操作请求体经 Zod schema 校验，失败返回 400 并记录审计。
 
-### 11.3 端到端加密（E2EE）— 已确认开启
+### 11.3 端到端加密（E2EE）— 已确认开启，⚠️ 但**当前未落地**
+
+> **实现状态（诚实说明）**：下面描述的是目标设计。
+> 当前代码只做到「服务端下发 `keyId`」这一步：
+> 房间密钥**材料**还没有分发协议，Web 客户端拿到 `keyId` 后直接丢弃
+> （`app/lib/room-controller.ts` 的 `void keyId`）。
+> 因此现在实际加密强度 = **DTLS-SRTP**，SFU 能看到明文音频。
+>
+> 真正开启前必须先定密钥分发协议（服务端只做分发、不持有明文音频），
+> 并同步更新 `docs/API.md` 与 `client/` SDK —— 否则每个客户端会各写一套。
+> 相关说明见第 22.5 节与 README「已知未完成」。
 
 **方案**：基于 WebRTC 原生 Insertable Streams（`RTCRtpScriptTransform`）。
 
@@ -858,11 +868,14 @@ CREATE TABLE settings (
 | `REALTIME_SFU_BEARER_TOKEN` | Secret | SFU App Secret |
 | `GUEST_KEY` | Secret | 访客 key |
 | `ADMIN_KEY` | Secret | 管理员 key |
-| `SESSION_SECRET` | Secret | JWT 签名密钥 |
+| `SESSION_SECRET` | Secret | 客户端会话 JWT 签名密钥 |
+| `ADMIN_SESSION_SECRET` | Secret | 管理后台会话签名密钥（**必须与上一个不同**，见第 22.2 节④） |
 | `TURNSTILE_SECRET_KEY` | Secret | Turnstile 服务端密钥 |
 | `VITE_TURNSTILE_SITE_KEY` | Var | Turnstile 前端 sitekey（公开，可进 git） |
 | `ADMIN_PATH` | Var | 后台路径（默认 `/dev`） |
 | `MAX_ROOM_MEMBERS` | Var | 默认房间人数上限 |
+| `ALLOWED_ORIGINS` | Var | 跨域白名单（逗号分隔）；留空 = 只服务同源。见第 22.2 节③ |
+| `ADMIN_LOGIN_TURNSTILE` | Var | 管理员登录是否强制人机验证（默认 `true`） |
 
 ### 密钥管理方式
 
@@ -1275,7 +1288,131 @@ node -e "console.log('SESSION_SECRET=' + crypto.randomUUID())"
 
 ---
 
-## 22. 待办：用户提供凭据后开工
+## 22. 跨客户端开放（已实现）
+
+> 目标：**服务端不假设客户端是浏览器**。网页、WebView 套壳、原生 App、CLI、
+> 第三方网页，都能接同一套 API。本节记录为此做的改动与背后的取舍。
+
+### 22.1 改动前的四个缺口
+
+| # | 缺口 | 后果 |
+|---|---|---|
+| 1 | 房间 WebSocket 只认 Cookie | 原生客户端根本连不上（WebSocket API 无法自定义请求头） |
+| 2 | 后台 API 只认 Cookie | 脚本 / CLI / 原生 App 无法调管理接口 |
+| 3 | 没有任何 CORS 头 | 另一个域名的网页客户端连登录都过不去 |
+| 4 | token 生命周期无对外契约 | 12 小时固定 TTL，没有 `/refresh`，长会话必然掉线 |
+
+另有一个文档缺口：契约散落在 `app/lib/api.ts`（web 端实现）里，
+而那份代码正是「不想依赖」的东西。
+
+### 22.2 五条设计决定
+
+**① 凭据：Bearer 是主路，Cookie 是浏览器专属的便利通道**
+
+`middleware/auth.ts` 同时接受 `Authorization: Bearer` 与 Cookie，
+且 **Bearer 优先**（显式声明的凭据应当胜过隐式的，否则「切账号」会被旧 cookie 覆盖）。
+`requireAdminSession` 也补上了 Bearer —— 它原来只认 cookie，
+但登录接口却明明返回了 token，属于自相矛盾。
+
+> 网页端也主动带 Bearer。这样「网页能跑」就等价于「别的客户端也能跑」，
+> 不会出现只有浏览器才通、别处一接就炸的路径。
+
+**② WebSocket：HTTP 领一次性票据**
+
+```
+POST /api/rooms/:id/ws-ticket   (带 Bearer)
+  → { ticket, expiresAt, wsUrl }
+WS  wss://…/api/rooms/:id/ws?ticket=<ticket>
+```
+
+票据存在 **RoomDO 自己的 SQLite 表**里（`ws_tickets`），因此天然与房间绑定：
+别的房间的 DO 里根本没有这张票。三重限制：60 秒过期、单次有效、绑定 uid。
+
+允许 **5 秒内的重复消费**：WebSocket 重连可能因网络抖动紧挨着发生两次，
+严格单次会让第二次莫名其妙连不上，而 5 秒窗口短到来不及被利用。
+
+老路径（Cookie + `?uid=`）保留，但 uid 由 Worker 从**已校验的会话**写入，
+客户端传什么都不算数。
+
+**③ CORS：默认关闭，白名单精确匹配**
+
+`ALLOWED_ORIGINS` 逗号分隔；命中才回显该 origin。三个细节：
+
+- **同源请求不写 CORS 头**。浏览器的同源请求也会带 `Origin`，
+  照抄会让服务端把自己当第三方。
+- **未命中时普通请求仍然照常处理**，只是不写 CORS 头。
+  非浏览器客户端（curl / 原生）不带 `Origin`，白名单对它们完全无感 ——
+  这也是「原生客户端零配置」的原因。
+- **`*` 与凭据互斥**。CORS 规范禁止 `Access-Control-Allow-Origin: *`
+  与 `Allow-Credentials: true` 共存，所以通配模式下只能用 Bearer。
+  这反而与第三方客户端的推荐做法一致。
+
+预检（OPTIONS）在最外层拦截，不会走到鉴权中间件 ——
+否则未登录的预检会被 401 掉，前端只能看到「CORS 预检失败」这种误导性错误。
+
+**④ 会话：滚动续期 + 绝对上限**
+
+```
+SESSION_TTL_HOURS = 12            # 滚动窗口
+SESSION_ABSOLUTE_TTL_HOURS = 720  # 30 天硬上限
+```
+
+任意鉴权请求都会顺带续期，但 **`iat` 是原始签发时间，续期时原样保留** ——
+否则「每次续期都刷新 iat」会把绝对上限骗过去，token 等于永不过期。
+
+续期后的 `exp` 必须是 `now + ttl`，**不是** `iat + ttl`。
+这一点最初的实现写错了：老 token 剩多久新 token 就还是多久，
+「续期」变成原地踏步。测试（`scripts/test-client-api.ts`）把这个 bug 钉住了。
+
+token 下发三条路，客户端只需实现一条也能跑：
+
+| 通道 | 场景 |
+|---|---|
+| 响应体 `data.token` | 登录 / refresh / 改资料 |
+| 响应头 `X-Refreshed-Token` | 任意鉴权请求都可能带（覆盖面最广） |
+| Cookie | 浏览器 |
+
+**⑤ 契约外置：清册 + OpenAPI + 参考实现**
+
+- `shared/api-surface.ts`：机器可读的接口清册（含鉴权等级、核心闭环标记）
+- `docs/API.md`：写给「写客户端的人」，含 WebRTC 对接步骤与踩坑清单
+- `docs/openapi.json`：OpenAPI 3.1（核心闭环，可导入 Postman / 代码生成器）
+- `client/`：零依赖 TypeScript 参考实现（认证 / 房间 / WS 重连 / 心跳）
+
+**防腐烂**：`scripts/test-client-api.ts` 会核对
+「OpenAPI 里的每个接口都在清册里」+「核心闭环接口都有文档」，
+改了路由不同步文档就会测试失败。
+
+### 22.3 与「不做 PWA」的关系
+
+第 19.1 节决定不做 PWA。这里要区分两件事：
+
+- **PWA**（可安装、离线、Service Worker）—— 仍然不做。
+- **跨客户端 API**（让别的客户端能接）—— 本次要做。
+
+前者是「网页的增强形态」，后者是「服务端不绑定网页」，方向不同。
+
+### 22.4 客户端库的边界
+
+`client/index.ts` **只负责信令与房间状态**，不碰媒体。
+音频采集、编解码、E2EE 是平台强相关的，由调用方实现 `MediaTransport`
+（接口定义在文件末尾）。好处：房间状态机与语音实现可以各自演进。
+
+约束：SDK 与它的测试必须能被 Node 的 type-stripping 直接加载，
+因此**不使用构造函数参数属性**（`constructor(readonly x: T)`）——
+strip-only 模式只擦除类型，无法生成参数属性所需的赋值。
+
+### 22.5 明确未做
+
+- **E2EE 仍未落地**（见第 11.3 节的说明与 README「已知未完成」）。
+  密钥分发协议必须先在 API 契约里定死，否则每个客户端会各写一套。
+- **HTTP 与 WebSocket 在 Worker 上是两条路径**，因此 CORS 中间件管不到
+  WebSocket 握手。目前够用（票据本身即凭据），但如果将来要限制
+  「哪些源可以连 WebSocket」，需要在 RoomDO 里再校验一次 Origin。
+
+---
+
+## 23. 待办：用户提供凭据后开工
 
 **当前状态**：设计定稿，等待用户完成第 21 节的凭据准备。
 

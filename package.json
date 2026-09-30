@@ -6,7 +6,7 @@
   "description": "基于 Cloudflare Realtime SFU + Workers 的私人游戏语音室",
   "license": "MIT",
   "engines": {
-    "node": ">=20"
+    "node": ">=22.6"
   },
   "scripts": {
     "dev": "vite",
@@ -16,6 +16,9 @@
     "cf-typegen": "wrangler types",
     "typecheck": "react-router typegen && tsc --noEmit",
     "test:gate": "node scripts/test-voice-gate.mjs",
+    "test:api": "node --experimental-strip-types --import ./scripts/ts-path-resolver.mjs --no-warnings scripts/test-client-api.ts",
+    "test:sdk": "node --experimental-strip-types --import ./scripts/ts-path-resolver.mjs --no-warnings scripts/test-sdk.ts",
+    "test": "npm run test:gate && npm run test:api && npm run test:sdk",
     "smoke:prejoin": "tsx scripts/smoke-prejoin.tsx",
     "gen:avatars": "tsx scripts/gen-avatars.ts",
     "db:migrate:local": "wrangler d1 migrations apply cf-teamspeed --local",

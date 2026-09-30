@@ -1,0 +1,959 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "cf-teamspeed API",
+    "version": "1.0.0",
+    "description": "基于 Cloudflare Realtime SFU + Workers 的私人游戏语音室 API。\n\n**这份文档覆盖完整的核心闭环**（客户端最少需要实现的部分）：配置、鉴权与续期、房间生命周期、WebSocket 握手票、SFU 信令、在线状态。\n\n其余接口（房间管理、管理后台）见 `docs/API.md`，那份是完整清单；本文件刻意保持精简，以便作为「新客户端接入检查表」使用。\n\n鉴权：除 `security: []` 的接口外，一律带 `Authorization: Bearer <token>`。\n\n错误：统一返回 `{ok:false, error, code}`；`code` 是稳定契约，分支判断请用它而不是 `error` 文案。",
+    "license": { "name": "MIT" }
+  },
+  "servers": [
+    { "url": "https://ts.futurvo.cc", "description": "示例部署（请替换成你自己的 Worker 域名）" }
+  ],
+  "tags": [
+    { "name": "meta", "description": "配置与健康检查" },
+    { "name": "auth", "description": "登录、续期、资料" },
+    { "name": "rooms", "description": "房间与 WebSocket 握手" },
+    { "name": "rtc", "description": "SFU 信令（发布 / 订阅 / 重协商）" },
+    { "name": "presence", "description": "服务器在线状态与邀请" }
+  ],
+  "security": [{ "bearerAuth": [] }],
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "description": "登录接口返回的 `token`。有效期 12 小时，随请求滚动续期；服务端会通过响应头 `X-Refreshed-Token` 下发新 token。"
+      }
+    },
+    "headers": {
+      "RefreshedToken": {
+        "description": "服务端滚动续期下发的新 token。出现时必须覆盖本地保存的 token。",
+        "schema": { "type": "string" }
+      }
+    },
+    "schemas": {
+      "ApiOk": {
+        "type": "object",
+        "required": ["ok", "data"],
+        "properties": {
+          "ok": { "const": true },
+          "data": {}
+        }
+      },
+      "ApiError": {
+        "type": "object",
+        "required": ["ok", "error"],
+        "properties": {
+          "ok": { "const": false },
+          "error": { "type": "string", "description": "给用户看的提示；文案可能变动" },
+          "code": { "$ref": "#/components/schemas/ErrorCode" },
+          "detail": { "description": "调试信息" }
+        }
+      },
+      "ErrorCode": {
+        "type": "string",
+        "description": "稳定错误码。客户端分支逻辑必须用它。",
+        "enum": [
+          "INVALID_KEY",
+          "INVALID_BODY",
+          "NICKNAME_TAKEN",
+          "NICKNAME_RESERVED",
+          "NICKNAME_INVALID",
+          "UNAUTHORIZED",
+          "SESSION_EXPIRED",
+          "FORBIDDEN",
+          "ROOM_NOT_FOUND",
+          "ROOM_FULL",
+          "RATE_LIMITED",
+          "BANNED",
+          "TURNSTILE_FAILED",
+          "BAD_TICKET",
+          "INTERNAL"
+        ]
+      },
+      "Profile": {
+        "type": "object",
+        "required": ["uid", "nickname", "role", "avatarId", "avatarUrl"],
+        "properties": {
+          "uid": { "type": "string", "description": "身份主键；昵称可改，uid 不变" },
+          "nickname": { "type": "string" },
+          "role": { "type": "string", "enum": ["guest", "admin"] },
+          "avatarId": { "type": ["string", "null"], "description": "12 个预设头像之一" },
+          "avatarUrl": { "type": ["string", "null"], "description": "自定义头像" }
+        }
+      },
+      "Session": {
+        "type": "object",
+        "required": ["token", "expiresAt", "sessionExpiresAt", "role", "profile"],
+        "properties": {
+          "token": { "type": "string", "description": "放进 Authorization: Bearer" },
+          "expiresAt": { "type": "integer", "description": "token 过期时间（Unix 秒）" },
+          "sessionExpiresAt": { "type": "integer", "description": "会话绝对上限（Unix 秒），到点必须重新登录" },
+          "role": { "type": "string", "enum": ["guest", "admin"] },
+          "profile": { "$ref": "#/components/schemas/Profile" }
+        }
+      },
+      "ClientConfig": {
+        "type": "object",
+        "properties": {
+          "appName": { "type": "string" },
+          "turnstileSiteKey": { "type": "string" },
+          "adminPath": { "type": "string" },
+          "maxRoomMembers": { "type": "integer" },
+          "e2eeEnabled": { "type": "boolean" },
+          "e2eeFallback": { "type": "boolean" },
+          "audioBitrateKbps": { "type": "integer" },
+          "adminLoginTurnstile": { "type": "boolean", "description": "管理员登录是否强制人机验证" },
+          "crossOrigin": { "type": "boolean", "description": "服务端是否配置了跨域白名单" }
+        }
+      },
+      "RoomSummary": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "ownerUid": { "type": ["string", "null"] },
+          "memberCount": { "type": "integer" },
+          "maxMembers": { "type": "integer" },
+          "createdAt": { "type": "integer" }
+        }
+      },
+      "RoomMember": {
+        "type": "object",
+        "properties": {
+          "uid": { "type": "string" },
+          "nickname": { "type": "string" },
+          "avatarId": { "type": ["string", "null"] },
+          "avatarUrl": { "type": ["string", "null"] },
+          "role": { "type": "string", "enum": ["guest", "admin"] },
+          "muted": { "type": "boolean" },
+          "joinedAt": { "type": "integer" },
+          "lastSeen": { "type": "integer" }
+        }
+      },
+      "RoomSnapshot": {
+        "type": "object",
+        "properties": {
+          "room": { "$ref": "#/components/schemas/RoomSummary" },
+          "members": { "type": "array", "items": { "$ref": "#/components/schemas/RoomMember" } },
+          "version": { "type": "integer", "description": "每次变更自增" }
+        }
+      },
+      "WsTicket": {
+        "type": "object",
+        "required": ["ticket", "expiresAt", "wsUrl"],
+        "properties": {
+          "ticket": { "type": "string", "description": "一次性票据，60 秒有效" },
+          "expiresAt": { "type": "integer" },
+          "wsUrl": { "type": "string", "description": "已拼好的 WebSocket 地址，直接用它连接" }
+        }
+      },
+      "TrackRef": {
+        "type": "object",
+        "properties": {
+          "trackName": { "type": "string" },
+          "uid": { "type": "string", "description": "发布者" },
+          "sessionId": { "type": "string", "description": "发布者 sessionId，订阅时要用" },
+          "mid": { "type": ["string", "null"] }
+        }
+      },
+      "SessionDescription": {
+        "type": "object",
+        "properties": {
+          "type": { "type": "string", "enum": ["offer", "answer"] },
+          "sdp": { "type": "string" }
+        }
+      },
+      "PresenceUser": {
+        "type": "object",
+        "properties": {
+          "uid": { "type": "string" },
+          "nickname": { "type": "string" },
+          "role": { "type": "string", "enum": ["guest", "admin"] },
+          "avatarId": { "type": ["string", "null"] },
+          "avatarUrl": { "type": ["string", "null"] },
+          "online": { "type": "boolean" },
+          "status": { "type": "string", "enum": ["online", "busy", "away", "invisible", "offline"] },
+          "invitable": { "type": "boolean" },
+          "roomId": { "type": ["string", "null"] },
+          "roomName": { "type": ["string", "null"] },
+          "lastSeen": { "type": "integer" }
+        }
+      },
+      "PresenceInvite": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "fromUid": { "type": "string" },
+          "fromNickname": { "type": "string" },
+          "roomId": { "type": "string" },
+          "roomName": { "type": "string" },
+          "createdAt": { "type": "integer" }
+        }
+      },
+      "PresenceSnapshot": {
+        "type": "object",
+        "properties": {
+          "online": { "type": "array", "items": { "$ref": "#/components/schemas/PresenceUser" } },
+          "offline": { "type": "array", "items": { "$ref": "#/components/schemas/PresenceUser" }, "description": "仅管理员非空" },
+          "invites": { "type": "array", "items": { "$ref": "#/components/schemas/PresenceInvite" }, "description": "取走即消费" },
+          "serverTime": { "type": "integer" }
+        }
+      }
+    },
+    "responses": {
+      "Unauthorized": {
+        "description": "未登录 / token 无效 / 会话到顶（`code` 分别为 `UNAUTHORIZED`、`SESSION_EXPIRED`）",
+        "content": {
+          "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } }
+        }
+      },
+      "RateLimited": {
+        "description": "请求过于频繁，按 `Retry-After` 头退避",
+        "headers": { "Retry-After": { "schema": { "type": "integer" }, "description": "建议等待秒数" } },
+        "content": {
+          "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } }
+        }
+      }
+    }
+  },
+  "paths": {
+    "/api/health": {
+      "get": {
+        "tags": ["meta"],
+        "summary": "存活探针",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "服务正常",
+            "content": {
+              "application/json": {
+                "schema": { "allOf": [{ "$ref": "#/components/schemas/ApiOk" }] }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/config": {
+      "get": {
+        "tags": ["meta"],
+        "summary": "非敏感前端配置",
+        "description": "客户端启动时先读它：应用名、人数上限、是否需要 Turnstile、是否开了跨域白名单。",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "配置",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/ApiOk" },
+                    { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/ClientConfig" } } }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/login": {
+      "post": {
+        "tags": ["auth"],
+        "summary": "用 key + 昵称换会话 token",
+        "description": "昵称全局唯一，已被占用返回 `NICKNAME_TAKEN`。管理员 key 登录需要 `turnstileToken`（见 `config.adminLoginTurnstile`）。",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["key", "nickname"],
+                "properties": {
+                  "key": { "type": "string" },
+                  "nickname": { "type": "string", "minLength": 2, "maxLength": 16 },
+                  "avatarId": { "type": ["string", "null"] },
+                  "turnstileToken": { "type": ["string", "null"] }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "登录成功",
+            "headers": {
+              "X-Refreshed-Token": { "$ref": "#/components/headers/RefreshedToken" },
+              "X-Auth-Method": { "schema": { "type": "string" }, "description": "本次用了哪种凭据" }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/ApiOk" },
+                    { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/Session" } } }
+                  ]
+                }
+              }
+            }
+          },
+          "401": { "description": "key 无效（`INVALID_KEY`）" },
+          "403": { "description": "人机验证失败（`TURNSTILE_FAILED`）或被封禁（`BANNED`）" },
+          "409": { "description": "昵称不可用（`NICKNAME_TAKEN` / `NICKNAME_RESERVED` / `NICKNAME_INVALID`）" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/api/auth/refresh": {
+      "post": {
+        "tags": ["auth"],
+        "summary": "会话续期",
+        "description": "其实任何鉴权请求都会滚动续期；这个接口给「整晚只挂 WebSocket」的客户端一个确定的续期时机。会话到绝对上限时返回 `SESSION_EXPIRED`，此时必须重新登录。",
+        "responses": {
+          "200": {
+            "description": "续期成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/ApiOk" },
+                    { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/Session" } } }
+                  ]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/api/auth/me": {
+      "get": {
+        "tags": ["auth"],
+        "summary": "当前会话与资料",
+        "responses": {
+          "200": {
+            "description": "当前资料",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/ApiOk" },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "data": {
+                          "type": "object",
+                          "properties": {
+                            "profile": { "$ref": "#/components/schemas/Profile" },
+                            "authMethod": { "type": "string", "enum": ["cookie", "bearer"] },
+                            "expiresAt": { "type": ["integer", "null"] },
+                            "sessionExpiresAt": { "type": "integer" }
+                          }
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      },
+      "patch": {
+        "tags": ["auth"],
+        "summary": "修改昵称 / 头像",
+        "description": "改名会原地同步到在线名册与所在房间，别人立刻看到新昵称；uid 不变。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "nickname": { "type": "string" },
+                  "avatarId": { "type": ["string", "null"] },
+                  "avatarDataUrl": {
+                    "type": ["string", "null"],
+                    "description": "data:image/(png|jpeg|webp);base64,…  ≤200KB"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "更新成功，返回新资料与新 token" },
+          "400": { "description": "昵称不可用（`NICKNAME_TAKEN` 等）" },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/api/auth/logout": {
+      "post": {
+        "tags": ["auth"],
+        "summary": "登出",
+        "description": "清 Cookie。JWT 无状态，客户端必须自己删掉 token。不需要鉴权（带过期 token 也要能登出）。",
+        "security": [],
+        "responses": { "200": { "description": "已登出" } }
+      }
+    },
+    "/api/rooms": {
+      "get": {
+        "tags": ["rooms"],
+        "summary": "房间列表（含成员明细）",
+        "responses": {
+          "200": {
+            "description": "房间列表",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/ApiOk" },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "data": {
+                          "type": "object",
+                          "properties": {
+                            "rooms": {
+                              "type": "array",
+                              "items": {
+                                "allOf": [
+                                  { "$ref": "#/components/schemas/RoomSummary" },
+                                  {
+                                    "type": "object",
+                                    "properties": {
+                                      "members": { "type": "array", "items": { "$ref": "#/components/schemas/RoomMember" } }
+                                    }
+                                  }
+                                ]
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      },
+      "post": {
+        "tags": ["rooms"],
+        "summary": "创建房间",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["name"],
+                "properties": {
+                  "name": { "type": "string", "maxLength": 24 },
+                  "maxMembers": { "type": "integer", "minimum": 2, "maximum": 50 }
+                }
+              }
+            }
+          }
+        },
+        "responses": { "201": { "description": "已创建" }, "429": { "$ref": "#/components/responses/RateLimited" } }
+      }
+    },
+    "/api/rooms/default": {
+      "get": {
+        "tags": ["rooms"],
+        "summary": "取默认房间 home（不存在则创建）",
+        "responses": { "200": { "description": "默认房间" }, "401": { "$ref": "#/components/responses/Unauthorized" } }
+      }
+    },
+    "/api/rooms/{id}/snapshot": {
+      "get": {
+        "tags": ["rooms"],
+        "summary": "房间快照（权威状态）",
+        "description": "收到 WebSocket 的 `room-changed` 后调它拿最新状态。",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": {
+          "200": {
+            "description": "快照",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/ApiOk" },
+                    { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/RoomSnapshot" } } }
+                  ]
+                }
+              }
+            }
+          },
+          "404": { "description": "房间不存在（`ROOM_NOT_FOUND`）" }
+        }
+      }
+    },
+    "/api/rooms/{id}/tracks": {
+      "get": {
+        "tags": ["rooms"],
+        "summary": "房间内可订阅的轨道",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": {
+          "200": {
+            "description": "轨道列表",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/ApiOk" },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "data": {
+                          "type": "object",
+                          "properties": {
+                            "tracks": { "type": "array", "items": { "$ref": "#/components/schemas/TrackRef" } }
+                          }
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/rooms/{id}/join": {
+      "post": {
+        "tags": ["rooms"],
+        "summary": "进入房间",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": {
+          "200": {
+            "description": "已进入",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/ApiOk" },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "data": {
+                          "type": "object",
+                          "properties": {
+                            "snapshot": { "$ref": "#/components/schemas/RoomSnapshot" },
+                            "keyId": { "type": "string", "description": "房间密钥 id（E2EE 用）" }
+                          }
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "409": { "description": "房间已满（`ROOM_FULL`）" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/api/rooms/{id}/leave": {
+      "post": {
+        "tags": ["rooms"],
+        "summary": "离开房间",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "已离开" } }
+      }
+    },
+    "/api/rooms/{id}/heartbeat": {
+      "post": {
+        "tags": ["rooms"],
+        "summary": "HTTP 心跳",
+        "description": "WebSocket 可用时优先走 socket 心跳。超过 45 秒无任何信号会被判定离线并回收房间资源。",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["roomId"],
+                "properties": { "roomId": { "type": "string" } }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "心跳结果",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/ApiOk" },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "data": {
+                          "type": "object",
+                          "properties": {
+                            "version": { "type": "integer" },
+                            "reaped": { "type": "integer", "description": "本次顺带清理的离线成员数" }
+                          }
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/rooms/{id}/mute": {
+      "post": {
+        "tags": ["rooms"],
+        "summary": "上报麦克风状态",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": { "muted": { "type": "boolean" } }
+              }
+            }
+          }
+        },
+        "responses": { "200": { "description": "已更新" } }
+      }
+    },
+    "/api/rooms/{id}/ws-ticket": {
+      "post": {
+        "tags": ["rooms"],
+        "summary": "领 WebSocket 握手票",
+        "description": "WebSocket API 无法自定义请求头，所以必须先走这个 HTTP 接口拿一次性票据，再用返回的 `wsUrl` 连接。票据 60 秒有效、单次有效，每次重连都要重新领。",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": {
+          "200": {
+            "description": "票据",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/ApiOk" },
+                    { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/WsTicket" } } }
+                  ]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/api/rtc/publish": {
+      "post": {
+        "tags": ["rtc"],
+        "summary": "发布本地音频",
+        "description": "客户端先 `setLocalDescription(offer)`，把 SDP 交给这里，拿回 answer。服务端持 App Secret 与 SFU 通信，Secret 永不下发。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["roomId", "sdp", "trackName"],
+                "properties": {
+                  "roomId": { "type": "string" },
+                  "sdp": { "type": "string" },
+                  "trackName": { "type": "string", "description": "客户端自定义，订阅方靠它定位" },
+                  "mid": { "type": "string", "description": "transceiver 的 mid" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "发布成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/ApiOk" },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "data": {
+                          "type": "object",
+                          "properties": {
+                            "sessionId": { "type": "string" },
+                            "sessionDescription": { "$ref": "#/components/schemas/SessionDescription" },
+                            "tracks": { "type": "array", "items": { "type": "object" } }
+                          }
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "502": { "description": "SFU 调用失败（`INTERNAL`）" }
+        }
+      }
+    },
+    "/api/rtc/subscribe-batch": {
+      "post": {
+        "tags": ["rtc"],
+        "summary": "批量订阅远端轨道（推荐）",
+        "description": "第一次不带 `sessionId`（新建接收会话），之后带上返回的 `sessionId` 复用。SFU 会返回 **offer**，客户端要 `createAnswer` 后调 `/api/rtc/renegotiate`。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["roomId", "tracks"],
+                "properties": {
+                  "roomId": { "type": "string" },
+                  "sessionId": { "type": "string", "description": "复用已有接收会话时传" },
+                  "tracks": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 16,
+                    "items": {
+                      "type": "object",
+                      "required": ["publisherSessionId", "trackName"],
+                      "properties": {
+                        "publisherSessionId": { "type": "string" },
+                        "trackName": { "type": "string" }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "接收会话与 offer" },
+          "404": { "description": "轨道不存在（`ROOM_NOT_FOUND`）" }
+        }
+      }
+    },
+    "/api/rtc/renegotiate": {
+      "post": {
+        "tags": ["rtc"],
+        "summary": "提交 SDP answer",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["roomId", "sessionId", "sdp"],
+                "properties": {
+                  "roomId": { "type": "string" },
+                  "sessionId": { "type": "string" },
+                  "sdp": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": { "200": { "description": "已重协商" } }
+      }
+    },
+    "/api/rtc/close": {
+      "post": {
+        "tags": ["rtc"],
+        "summary": "关闭轨道",
+        "description": "⚠️ 服务端只认 **mid**，不认 trackName。自己发布的轨道服务端能查出 mid；订阅侧的接收 mid 要由客户端通过 `mids` 提供。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["roomId", "sessionId", "trackNames"],
+                "properties": {
+                  "roomId": { "type": "string" },
+                  "sessionId": { "type": "string" },
+                  "trackNames": { "type": "array", "items": { "type": "string" } },
+                  "mids": { "type": "array", "items": { "type": "string" }, "description": "与 trackNames 一一对应" },
+                  "force": { "type": "boolean", "description": "默认 true：不等 SDP 交换" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "已关闭（幂等）" },
+          "403": { "description": "无权关闭该轨道（`FORBIDDEN`）" }
+        }
+      }
+    },
+    "/api/presence/heartbeat": {
+      "post": {
+        "tags": ["presence"],
+        "summary": "登记在线状态与所在房间",
+        "description": "建议 15 秒一次。被移出服务器时返回 `{alive:false, banned:true}`（成功响应 + 标记）—— 高频心跳里抛 403 容易被客户端当成网络抖动忽略掉。看到 `banned:true` 就清本地会话并回登录。",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "roomId": { "type": ["string", "null"] },
+                  "roomName": { "type": ["string", "null"] },
+                  "status": { "type": "string", "enum": ["online", "busy", "away", "invisible"] },
+                  "invitable": { "type": "boolean" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "已在册（或已被移出服务器）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/ApiOk" },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "data": {
+                          "type": "object",
+                          "properties": {
+                            "alive": { "type": "boolean" },
+                            "banned": { "type": "boolean", "description": "true = 已被移出服务器，客户端应清会话回登录" }
+                          }
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/presence/poll": {
+      "post": {
+        "tags": ["presence"],
+        "summary": "拉成员名册 + 取走新邀请",
+        "description": "邀请是「取走即消费」：同一条邀请只会返回一次。建议 6 秒一次。",
+        "responses": {
+          "200": {
+            "description": "在线状态快照",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/ApiOk" },
+                    { "type": "object", "properties": { "data": { "$ref": "#/components/schemas/PresenceSnapshot" } } }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/presence/leave": {
+      "post": {
+        "tags": ["presence"],
+        "summary": "主动下线",
+        "responses": { "200": { "description": "已下线" } }
+      }
+    },
+    "/api/presence/invite": {
+      "post": {
+        "tags": ["presence"],
+        "summary": "邀请他人进房间",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["toUid", "roomId"],
+                "properties": {
+                  "toUid": { "type": "string" },
+                  "roomId": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "已投递（或对方状态不允许，`reason` 说明原因）" },
+          "403": { "description": "你不在这个房间里（`FORBIDDEN`）" }
+        }
+      }
+    },
+    "/api/presence/kick": {
+      "post": {
+        "tags": ["presence"],
+        "summary": "踢出服务器（管理员）",
+        "description": "需要客户端会话且 `role=admin`：断开在线状态 + 封禁昵称 + 移出所在房间。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["uid"],
+                "properties": {
+                  "uid": { "type": "string" },
+                  "reason": { "type": "string" },
+                  "durationMinutes": { "type": "integer", "description": "不填为永久" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "已踢出并封禁" },
+          "403": { "description": "权限不足（`FORBIDDEN`）" }
+        }
+      }
+    }
+  },
+  "x-websocket": {
+    "description": "房间事件流。握手必须带一次性票据：先用 `POST /api/rooms/{id}/ws-ticket` 领票，再用返回的 wsUrl 连接。",
+    "url": "/api/rooms/{id}/ws?ticket=<ticket>",
+    "downlink": [
+      { "type": "room-changed", "payload": "{ version: number }", "action": "拉一次 /api/rooms/{id}/snapshot" },
+      { "type": "member-joined", "payload": "{ member: RoomMember }", "action": "可选：播提示音，拉快照" },
+      { "type": "member-left", "payload": "{ uid: string }", "action": "移除该成员的音频，拉快照" },
+      { "type": "key-rotated", "payload": "{ keyId: string }", "action": "E2EE 客户端重新取房间密钥" },
+      { "type": "kicked", "payload": "{ reason: string }", "action": "停止一切，提示用户，不要重连" },
+      { "type": "room-closed", "payload": "{ reason: string }", "action": "停止一切，不要重连" }
+    ],
+    "uplink": [
+      { "type": "heartbeat", "description": "保活；建议 15 秒一次（比 HTTP 省额度）" },
+      { "type": "mute", "payload": "{ muted: boolean }", "description": "上报麦克风状态" }
+    ],
+    "notes": [
+      "服务端超过 45 秒收不到任何信号会判定离线并回收房间资源。",
+      "断线后请重新领票再连（票是单次有效的），并做指数退避。",
+      "收到 kicked / room-closed 后必须停止重连。"
+    ]
+  }
+}

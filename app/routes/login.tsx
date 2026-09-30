@@ -15,6 +15,7 @@ import {
   loadSettings,
   readInviteParams,
   resolveBaseUrl,
+  saveSession,
   saveSettings,
 } from '~/lib/settings';
 import { PRESET_AVATARS } from '@shared/constants';
@@ -101,6 +102,9 @@ export default function Login() {
         nickname: res.profile.nickname,
         avatarId: res.profile.avatarId,
       });
+      // 记下会话 token：之后所有请求带 Bearer。
+      // （HttpOnly Cookie 同时也下发了，两条路都通，服务端 Bearer 优先。）
+      saveSession(res.token, res.expiresAt, res.sessionExpiresAt);
       navigate('/', { replace: true });
     } catch (err) {
       if (err instanceof ApiError && err.code === 'TURNSTILE_FAILED') {

@@ -17,16 +17,18 @@
 | `GUEST_KEY` | 自动生成随机 UUID | 发给朋友用 |
 | `ADMIN_KEY` | 自动生成随机 UUID | ⚠️ 泄漏 = 后台失守 |
 | `SESSION_SECRET` | 自动生成随机 UUID | ⚠️ 更换会导致全员掉线 |
+| `ADMIN_SESSION_SECRET` | 自动生成随机 UUID | ⚠️ 必须与 `SESSION_SECRET` **不同**；泄漏 = 后台失守 |
 | `TURNSTILE_SECRET_KEY` | 当前为官方测试 key | 部署前必须换真实值 |
 
 后两项（`CF_ANALYTICS_API_TOKEN` / `CF_ACCOUNT_ID`）**留空**，不影响核心功能。
 
-### `wrangler.jsonc` —— 2 个值
+### `wrangler.jsonc` —— 3 处可调
 
 | 位置 | 状态 |
 |---|---|
 | `d1_databases[0].database_id` | ✅ 已填（D1 已创建） |
 | `vars.TURNSTILE_SITE_KEY` | ✅ 已填测试 key |
+| `vars.ALLOWED_ORIGINS` | 默认空 = 只服务同源页面。前端与 Worker 同域、或用原生客户端时**无需修改** |
 
 ---
 
@@ -100,10 +102,11 @@ wrangler whoami          # 确认账号正确
 wrangler d1 create cf-teamspeed
 # → 输出一段配置，把 database_id 填进本机 wrangler.jsonc
 
-# 3. 生成三个自定义密钥
+# 3. 生成四个自定义密钥
 node -e "console.log(crypto.randomUUID())"   # GUEST_KEY
 node -e "console.log(crypto.randomUUID())"   # ADMIN_KEY
 node -e "console.log(crypto.randomUUID())"   # SESSION_SECRET
+node -e "console.log(crypto.randomUUID())"   # ADMIN_SESSION_SECRET（必须与上面不同）
 
 # 4. SFU 应用（手动创建，见下方注意事项）
 #    https://dash.cloudflare.com/?to=%2F%3Aaccount%2Frealtime%2Fsfu

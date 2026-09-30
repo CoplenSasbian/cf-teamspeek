@@ -3,15 +3,17 @@ import { Outlet, useLocation, useNavigate } from 'react-router';
 import { AlertTriangle, Check, Loader2, Menu, Settings, Users, X } from 'lucide-react';
 
 import { SettingsPanel, type SettingsTab } from '~/components/SettingsPanel';
+import { DENOISE_OPTIONS } from '~/components/audio-shared';
 import { InviteToasts } from '~/components/InviteToasts';
 import { MemberRail } from '~/components/MemberRail';
 import { RoomDialog, type RoomDraft } from '~/components/RoomDialog';
 import { Sidebar } from '~/components/Sidebar';
-import { ApiError, authApi, presenceApi, roomsApi, setBaseUrl } from '~/lib/api';
+import { ApiError, authApi, presenceApi, roomsApi, setBaseUrl, setSessionExpiredHandler } from '~/lib/api';
 import type { DenoiseEngine } from '~/lib/denoise';
 import { audioMixer } from '~/lib/audio-mixer';
 import {
   buildInviteUrl,
+  clearSession,
   loadSettings,
   micInputPrefsOf,
   resolveBaseUrl,
@@ -162,6 +164,8 @@ export default function AppShell() {
     bannedRef.current = true;
     notify('你已被移出本服务器', 'error');
     void authApi.logout().catch(() => undefined);
+    // 本地 token 也要清：否则下次请求会带着一个已知无效的凭据反复 401
+    clearSession();
     setTimeout(() => navigate('/login', { replace: true }), 1500);
   }, [navigate, notify]);
 
@@ -286,24 +290,23 @@ export default function AppShell() {
   const setDenoise = useCallback(
     (engine: DenoiseEngine) => {
       updatePrefs({ denoise: engine });
+      // 标签从 DENOISE_OPTIONS 派生 —— 不要在调用点硬编码引擎名，
+      // 否则每加一个引擎就要改好几处文案，实际已经漏过（加 dfn3 时差点又漏）。
+      const label = DENOISE_OPTIONS.find((o) => o.value === engine)?.short ?? engine;
       notify(
-        engine === 'off'
-          ? '降噪已关闭，进房后发送原始麦克风'
-          : engine === 'gtcrn'
-            ? '已选 GTCRN，进房后生效'
-            : '已选 RNNoise，进房后生效',
+        engine === 'off' ? '降噪已关闭，进房后发送原始麦克风' : `已选 ${label}，进房后生效`,
       );
     },
     [updatePrefs, notify],
   );
 
   /**
-   * 循环切换降噪：off → gtcrn → rnnoise → off。
+   * 循环切换降噪：按 DENOISE_OPTIONS 的顺序轮转（off → gtcrn → rnnoise → dfn3 → off）。
    * 保存设置 + 立即应用（在房间里时）；状态面板和语音卡片同步。
    */
   const cycleDenoise = useCallback(async () => {
     if (denoiseSwitching) return;
-    const order: DenoiseEngine[] = ['off', 'gtcrn', 'rnnoise'];
+    const order: DenoiseEngine[] = DENOISE_OPTIONS.map((o) => o.value);
     const next = order[(order.indexOf(prefs.denoise) + 1) % order.length];
 
     setDenoiseSwitching(true);
@@ -311,13 +314,8 @@ export default function AppShell() {
       const applied = await applyDenoise(next);
       updatePrefs({ denoise: next });
       if (applied) {
-        notify(
-          next === 'off'
-            ? '降噪已关闭'
-            : next === 'gtcrn'
-              ? 'GTCRN 降噪已生效'
-              : 'RNNoise 降噪已生效',
-        );
+        const label = DENOISE_OPTIONS.find((o) => o.value === next)?.short ?? next;
+        notify(next === 'off' ? '降噪已关闭' : `${label} 降噪已生效`);
       } else if (next !== 'off' && audioMixer.hasMicPipeline()) {
         // 在房间里但没生效：模型没起来，已回退原始麦克风
         notify('降噪没能启动（模型初始化失败），已回退为发送原始麦克风', 'error');
@@ -504,8 +502,51 @@ export default function AppShell() {
   const logout = useCallback(async () => {
     await presenceApi.leave().catch(() => undefined);
     await authApi.logout().catch(() => undefined);
+    // 本地也要清干净：token 是跨客户端通用凭据，不能只靠服务端清 cookie
+    clearSession();
     navigate('/login', { replace: true });
   }, [navigate]);
+
+  /**
+   * 会话失效处理：401 时 api 层已经清了本地 token，这里只负责把用户送回登录页。
+   * 用 ref 保证只跳一次（房间页 + presence 轮询可能同时收到 401）。
+   */
+  const sessionExpiredRef = useRef(false);
+  useEffect(() => {
+    setSessionExpiredHandler(() => {
+      if (sessionExpiredRef.current) return;
+      sessionExpiredRef.current = true;
+      navigate('/login', { replace: true });
+    });
+    return () => setSessionExpiredHandler(null);
+  }, [navigate]);
+
+  /**
+   * 后台续期。
+   *
+   * 服务端本来就会在任意鉴权请求上滚动续期，这里定时打一次 `/refresh`
+   * 是为了覆盖「长时间只挂着、没有任何请求」的场景（例如整晚挂在大厅）。
+   * 顺便让本地记录的 `sessionExpiresAt` 保持准确。
+   */
+  useEffect(() => {
+    if (!signedIn) return;
+    const refresh = () => {
+      void authApi.refresh().catch((err: unknown) => {
+        // 会话到顶（SESSION_EXPIRED）→ 交给上面的处理器跳登录页；
+        // 网络抖动等其它错误忽略，下一次再试。
+        if (err instanceof ApiError && err.isSessionExpired) {
+          void logout();
+        }
+      });
+    };
+    // 启动 30 秒后先对一次时（可能从后台恢复），之后每 30 分钟一次
+    const kickoff = setTimeout(refresh, 30_000);
+    const timer = setInterval(refresh, 30 * 60_000);
+    return () => {
+      clearTimeout(kickoff);
+      clearInterval(timer);
+    };
+  }, [signedIn, logout]);
 
   /** 离开当前房间（侧栏语音面板的挂断按钮） */
   const leaveRoom = useCallback(() => {

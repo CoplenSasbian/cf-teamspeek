@@ -61,6 +61,25 @@ export class RoomDO extends DurableObject<Env> {
           value TEXT NOT NULL
         );
       `);
+
+      // WebSocket 握手 ticket。
+      //
+      // 为什么需要它：浏览器和原生客户端的 WebSocket API 都**无法自定义请求头**，
+      // 也就没法带 `Authorization: Bearer`。原来的做法只能靠 Cookie ——
+      // 于是任何不持有 Cookie 的客户端（原生 App / CLI / 另一个域名的网页）
+      // 都连不上房间。
+      //
+      // 现在的流程：先用普通 HTTP（可带 Bearer）调 `/ws-ticket` 领一张一次性票据，
+      // 再把它放进 WebSocket 的查询串。票据短命（60s）、单次有效、绑定 uid。
+      this.sql.exec(`
+        CREATE TABLE IF NOT EXISTS ws_tickets (
+          ticket      TEXT PRIMARY KEY,
+          uid         TEXT NOT NULL,
+          expires_at  INTEGER NOT NULL,
+          used_at     INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_ws_tickets_expires ON ws_tickets(expires_at);
+      `);
     });
 
     // WebSocket 自动响应 ping/pong（Hibernation 兼容）
@@ -477,6 +496,71 @@ export class RoomDO extends DurableObject<Env> {
   //  WebSocket（Hibernation API）
   // ==========================================================
 
+  // ==========================================================
+  //  WebSocket 握手 ticket
+  // ==========================================================
+
+  /**
+   * 签发一张 WebSocket 握手票据。
+   *
+   * 由 Worker 在**已经过鉴权**的 HTTP 请求里调用（`POST /api/rooms/:id/ws-ticket`），
+   * 所以这里不再校验身份 —— 但票据本身做三重限制：
+   *   1. 只在这个房间的 DO 里存在，别的房间用不了；
+   *   2. 60 秒过期（握手是紧跟着发生的）；
+   *   3. 单次有效（重连必须重新领票）。
+   *
+   * 顺手清理过期票据：表很小，每次签发时扫一遍即可，
+   * 不能用 setInterval（会阻止 DO 休眠产生时长费）。
+   */
+  async issueWsTicket(input: { uid: string; ttlSeconds: number }): Promise<string> {
+    const now = Date.now();
+    this.sql.exec('DELETE FROM ws_tickets WHERE expires_at < ? AND used_at IS NULL', now);
+
+    const ticket = crypto.randomUUID().replace(/-/g, '') + crypto.randomUUID().replace(/-/g, '');
+    this.sql.exec(
+      'INSERT INTO ws_tickets (ticket, uid, expires_at) VALUES (?, ?, ?)',
+      ticket,
+      input.uid,
+      now + input.ttlSeconds * 1000,
+    );
+    return ticket;
+  }
+
+  /**
+   * 消费一张票据。返回 null 表示无效（不存在 / 已过期 / 已被别人用过）。
+   *
+   * 幂等窗口：票据标记为已用之后 **5 秒内**仍允许再次消费。
+   * 因为 WebSocket 重连可能因为网络抖动紧挨着发生两次，若严格单次，
+   * 第二次会莫名其妙连不上；而 5 秒的窗口短到来不及被利用。
+   */
+  private consumeTicket(ticket: string): { uid: string } | null {
+    const now = Date.now();
+    const rows = this.sql
+      .exec<{ uid: string; expires_at: number; used_at: number | null }>(
+        'SELECT uid, expires_at, used_at FROM ws_tickets WHERE ticket = ?',
+        ticket,
+      )
+      .toArray();
+
+    const row = rows[0];
+    if (!row) return null;
+
+    if (row.expires_at < now) {
+      this.sql.exec('DELETE FROM ws_tickets WHERE ticket = ?', ticket);
+      return null;
+    }
+
+    if (row.used_at !== null && now - row.used_at > 5_000) {
+      return null;
+    }
+
+    if (row.used_at === null) {
+      this.sql.exec('UPDATE ws_tickets SET used_at = ? WHERE ticket = ?', now, ticket);
+    }
+
+    return { uid: row.uid };
+  }
+
   override async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
 
@@ -486,7 +570,26 @@ export class RoomDO extends DurableObject<Env> {
         return new Response('Expected WebSocket', { status: 426 });
       }
 
-      const uid = url.searchParams.get('uid') ?? '';
+      // ---- 身份来源二选一 ----
+      //   ① ticket：跨客户端方案（Bearer 领票 → 查询串带上）
+      //   ② uid   ：同源网页方案（Worker 侧的 requireAuth 已经验过 Cookie）
+      //   两者都没有 = 匿名连接，直接拒绝。
+      const ticket = url.searchParams.get('ticket');
+      const queryUid = url.searchParams.get('uid');
+      let uid: string;
+
+      if (ticket) {
+        const consumed = this.consumeTicket(ticket);
+        if (!consumed) {
+          return new Response('Invalid or expired ticket', { status: 401 });
+        }
+        uid = consumed.uid;
+      } else if (queryUid) {
+        uid = queryUid;
+      } else {
+        return new Response('Unauthorized', { status: 401 });
+      }
+
       const sessionId = url.searchParams.get('sid');
 
       const pair = new WebSocketPair();

@@ -15,6 +15,47 @@ export interface SessionPayload {
   exp?: number;
 }
 
+/** 非敏感前端配置（GET /api/auth/config，无需鉴权） */
+export interface ClientConfig {
+  appName: string;
+  turnstileSiteKey: string;
+  adminPath: string;
+  maxRoomMembers: number;
+  e2eeEnabled: boolean;
+  e2eeFallback: boolean;
+  audioBitrateKbps: number;
+  /** 管理员登录是否需要人机验证（原生客户端可据此决定是否内嵌 WebView） */
+  adminLoginTurnstile: boolean;
+  /** 服务端是否开启了跨域白名单（第三方网页客户端排查用） */
+  crossOrigin: boolean;
+}
+
+/**
+ * 登录 / 续期 / 改资料 返回的会话。
+ *
+ * `token` 是唯一需要持久化的凭据：任何客户端（网页 / 原生 / CLI）
+ * 都可以把它放进 `Authorization: Bearer <token>`。
+ * 网页端额外拿到 HttpOnly Cookie，可以完全不碰 token。
+ */
+export interface SessionResult {
+  token: string;
+  /** token 绝对过期时间（Unix 秒） */
+  expiresAt: number;
+  /** 会话绝对上限（Unix 秒）；到此必须重新用 key 登录 */
+  sessionExpiresAt: number;
+  role: Role;
+  profile: Profile;
+}
+
+/** WebSocket 握手 ticket（POST /api/rooms/:id/ws-ticket） */
+export interface WsTicket {
+  ticket: string;
+  /** 过期时间（Unix 秒） */
+  expiresAt: number;
+  /** 直接可用的 WebSocket 地址（含 ticket），客户端无需自己拼 */
+  wsUrl: string;
+}
+
 /** 用户资料（登录后回传） */
 export interface Profile {
   uid: string;
@@ -125,22 +166,54 @@ export type ApiResult<T> =
   | { ok: true; data: T }
   | { ok: false; error: string; code?: string };
 
-/** 错误码 */
+/**
+ * 错误码 —— **跨客户端契约的一部分**。
+ *
+ * 客户端应当按 `code` 分支处理（而不是解析中文 error 文案），
+ * 文案只用于展示，可能随版本变化。
+ */
 export const ErrorCode = {
+  /** key 无效 */
   INVALID_KEY: 'INVALID_KEY',
+  /** 请求体/查询参数不合法（含 Zod 校验失败） */
   INVALID_BODY: 'INVALID_BODY',
+  /** 昵称已被占用 */
   NICKNAME_TAKEN: 'NICKNAME_TAKEN',
+  /** 昵称为保留字（admin / 官方 …） */
   NICKNAME_RESERVED: 'NICKNAME_RESERVED',
+  /** 昵称格式不合法 */
   NICKNAME_INVALID: 'NICKNAME_INVALID',
+  /** 未登录 / token 无效 */
   UNAUTHORIZED: 'UNAUTHORIZED',
+  /**
+   * 会话超出绝对寿命，必须重新登录。
+   * 与 UNAUTHORIZED 的区别：这不是「token 写错了」，而是「该重新登录了」，
+   * 客户端应清理本地会话并跳登录页，而不是重试。
+   */
+  SESSION_EXPIRED: 'SESSION_EXPIRED',
+  /** 权限不足 */
   FORBIDDEN: 'FORBIDDEN',
+  /** 房间不存在 */
   ROOM_NOT_FOUND: 'ROOM_NOT_FOUND',
+  /** 房间已满 */
   ROOM_FULL: 'ROOM_FULL',
+  /** 请求过于频繁 */
   RATE_LIMITED: 'RATE_LIMITED',
+  /** 已被移出服务器（封禁） */
   BANNED: 'BANNED',
+  /** 人机验证未通过 */
   TURNSTILE_FAILED: 'TURNSTILE_FAILED',
+  /** WebSocket ticket 无效/过期/已被使用 */
+  BAD_TICKET: 'BAD_TICKET',
+  /** 服务端内部错误（含 SFU 调用失败） */
   INTERNAL: 'INTERNAL',
 } as const;
+
+/** 需要重新登录的错误码集合（客户端统一处理） */
+export const AUTH_ERROR_CODES: readonly string[] = [
+  ErrorCode.UNAUTHORIZED,
+  ErrorCode.SESSION_EXPIRED,
+];
 
 export type ErrorCodeType = (typeof ErrorCode)[keyof typeof ErrorCode];
 
