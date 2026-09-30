@@ -28,22 +28,22 @@
 
 ```bash
 # 1. 拿配置（无需鉴权）
-curl https://ts.futurvo.cc/api/auth/config
+curl https://room.example.com/api/auth/config
 
 # 2. 用 key + 昵称换 token
-curl -X POST https://ts.futurvo.cc/api/auth/login \
+curl -X POST https://room.example.com/api/auth/login \
   -H 'Content-Type: application/json' \
   -d '{"key":"<GUEST_KEY>","nickname":"甲"}'
 # → {"ok":true,"data":{"token":"eyJ...","expiresAt":...,"profile":{...}}}
 
 # 3. 之后所有请求带上它
-curl https://ts.futurvo.cc/api/rooms -H 'Authorization: Bearer eyJ...'
+curl https://room.example.com/api/rooms -H 'Authorization: Bearer eyJ...'
 
 # 4. 进房间
-curl -X POST https://ts.futurvo.cc/api/rooms/home/join -H 'Authorization: Bearer eyJ...'
+curl -X POST https://room.example.com/api/rooms/home/join -H 'Authorization: Bearer eyJ...'
 
 # 5. 领 WebSocket 票（WebSocket 没法带请求头，所以要先领票）
-curl -X POST https://ts.futurvo.cc/api/rooms/home/ws-ticket -H 'Authorization: Bearer eyJ...'
+curl -X POST https://room.example.com/api/rooms/home/ws-ticket -H 'Authorization: Bearer eyJ...'
 # → {"ok":true,"data":{"ticket":"...","wsUrl":"wss://.../ws?ticket=..."}}
 
 # 6. 用拿到的 wsUrl 连 WebSocket，开始收房间事件
@@ -633,7 +633,7 @@ const ws = new WebSocket(data.wsUrl);
 ```ts
 import { VoiceRoomClient } from './client/index';
 
-const client = new VoiceRoomClient({ baseUrl: 'https://ts.futurvo.cc' });
+const client = new VoiceRoomClient({ baseUrl: 'https://room.example.com' });
 
 client.on('snapshot', (snap) => console.log('成员变化', snap.members));
 client.on('kicked', (e) => console.log('被踢', e.reason));

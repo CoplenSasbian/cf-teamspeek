@@ -188,37 +188,39 @@ await check('后台会话绝对寿命比客户端短', async () => {
 
 console.log('\n[3] CORS 白名单');
 
-const URL_ = 'https://ts.futurvo.cc/api/auth/login';
+// 用占位域名，不写真实部署地址（仓库可能公开）
+const SERVER_ORIGIN = 'https://room.example.com';
+const SERVER = `${SERVER_ORIGIN}/api/auth/login`;
 
 await check('白名单为空 → 任何跨域都不放行', () => {
-  assert.equal(resolveCorsOrigin('https://evil.com', URL_, []), null);
+  assert.equal(resolveCorsOrigin('https://evil.com', SERVER, []), null);
 });
 
 await check('同源请求不写 CORS 头（避免把自己当第三方）', () => {
-  assert.equal(resolveCorsOrigin('https://ts.futurvo.cc', URL_, ['https://ts.futurvo.cc']), null);
+  assert.equal(resolveCorsOrigin(SERVER_ORIGIN, SERVER, [SERVER_ORIGIN]), null);
 });
 
 await check('原生客户端（无 Origin）不写 CORS 头，但请求照常放行', () => {
-  assert.equal(resolveCorsOrigin(undefined, URL_, ['https://a.com']), null);
+  assert.equal(resolveCorsOrigin(undefined, SERVER, ['https://a.com']), null);
 });
 
 await check('命中白名单 → 回显来源且允许凭据', () => {
-  const r = resolveCorsOrigin('https://app.example.com', URL_, ['https://app.example.com']);
+  const r = resolveCorsOrigin('https://app.example.com', SERVER, ['https://app.example.com']);
   assert.deepEqual(r, { origin: 'https://app.example.com', credentials: true });
 });
 
 await check('大小写与结尾斜杠不影响匹配', () => {
-  const r = resolveCorsOrigin('HTTPS://App.Example.com', URL_, ['https://app.example.com']);
+  const r = resolveCorsOrigin('HTTPS://App.Example.com', SERVER, ['https://app.example.com']);
   assert.ok(r);
   assert.equal(r.origin, 'HTTPS://App.Example.com', '回显应当保留客户端原始写法');
 });
 
 await check('未命中白名单 → 不放行', () => {
-  assert.equal(resolveCorsOrigin('https://evil.com', URL_, ['https://app.example.com']), null);
+  assert.equal(resolveCorsOrigin('https://evil.com', SERVER, ['https://app.example.com']), null);
 });
 
 await check('通配 * → 放行但不允许凭据（只能用 Bearer）', () => {
-  const r = resolveCorsOrigin('https://anything.example', URL_, ['*']);
+  const r = resolveCorsOrigin('https://anything.example', SERVER, ['*']);
   assert.ok(r);
   assert.equal(r.credentials, false, '通配时不能带 cookie，否则等于任意站点可冒充用户');
 });

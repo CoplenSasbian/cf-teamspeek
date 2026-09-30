@@ -69,7 +69,7 @@ export interface ClientEvents {
 type Handler<T> = (payload: T) => void;
 
 export interface VoiceRoomClientOptions {
-  /** 服务器地址，例如 `https://ts.futurvo.cc` */
+  /** 服务器地址，例如 `https://room.example.com` */
   baseUrl: string;
   /** 持久化实现；浏览器默认 localStorage，其他环境默认内存 */
   storage?: StorageAdapter;
