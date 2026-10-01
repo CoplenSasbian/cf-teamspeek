@@ -132,6 +132,19 @@ public sealed class ApiResult<T>
     /// <summary>稳定错误码，见 <see cref="ErrorCodes"/>。分支判断只认它。</summary>
     [JsonPropertyName("code")]
     public string? Code { get; init; }
+
+    /// <summary>
+    /// 上游（SFU 等）的原始错误详情。
+    ///
+    /// 服务端把 Cloudflare 的原话放在这里，而 <see cref="Error"/> 只是
+    /// 一句笼统的「SFU 调用失败」。排查 renegotiate 这类问题时，
+    /// 真正有用的信息全在 detail —— 之前没透传，导致只能看到一句无信息量的话。
+    ///
+    /// 类型是 JsonElement：detail 是任意结构（对象/字符串/数组都可能），
+    /// 用 string 会在遇到对象时反序列化失败，把整个错误响应变成「解析异常」。
+    /// </summary>
+    [JsonPropertyName("detail")]
+    public JsonElement? Detail { get; init; }
 }
 
 /// <summary>

@@ -359,7 +359,11 @@ public sealed class ApiClient : IDisposable
                 throw missing;
             }
 
-            var error = ApiException.FromEnvelope(envelope.Error, envelope.Code, status);
+            var error = ApiException.FromEnvelope(
+                envelope.Error,
+                envelope.Code,
+                status,
+                envelope.Detail?.ToString());
             HandleAuthSideEffects(error, status, envelope.Code);
             throw error;
         }

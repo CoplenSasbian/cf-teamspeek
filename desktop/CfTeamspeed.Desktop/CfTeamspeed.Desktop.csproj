@@ -87,6 +87,61 @@
         要锁传递依赖版本，用 CentralPackageTransitivePinning，
         而不是加 PackageReference。
     -->
+
+    <!--
+      ============================================================
+        RTC 音频链路（语音室本体）
+      ============================================================
+
+      SIPSorcery —— 纯 C# 的 WebRTC 实现（BSD-3）。
+      选它的理由（2026 年实测过一轮）：
+        · 纯托管、无原生依赖 —— 与「自包含 + 非打包」的部署形态契合，
+          不会像 libwebrtc 那样带进来几百 MB 原生二进制；
+        · 活跃维护，net10.0 已在一等公民列表里；
+        · 内置 Opus（通过 Concentus），SFU 场景够用。
+
+      淘汰的选项（都记下来，避免以后重复调研）：
+        · Microsoft.WinRTC.libwebrtc.win32 —— 最后更新 2021 年、beta、
+          仅 UWP、154MB 静态库，等于死路；
+        · Microsoft.MixedReality.WebRTC —— 已进维护状态。
+
+      SIPSorceryMedia.Windows —— 麦克风采集 / 扬声器播放（NAudio 后端）。
+      实测它的 lib 目录是 net10.0-windows10.0.17763，与本项目 TFM 精确匹配。
+    -->
+    <PackageReference Include="SIPSorcery" Version="10.0.16" />
+    <PackageReference Include="SIPSorceryMedia.Windows" Version="10.0.16" />
+
+    <!--
+      实时降噪（DeepFilterNet3 推理）。
+      之前担心的「原生 DLL 体积」其实不是新增负担：
+      Windows App SDK 本来就带了 onnxruntime.dll，这个包只是补上托管封装。
+    -->
+    <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.20.1" />
+  </ItemGroup>
+
+  <!--
+    DeepFilterNet3 模型随构建拷贝到输出目录的 models/。
+    文件不进仓库（13MB 二进制、可由 release 再生成），
+    本机下载过之后让它跟 bin 一起过去，运行时才找得到。
+    缺失时 Dfn3Model.ResolveModelDirectory() 返回 null，
+    降噪自动降级到「语音门限」，不会崩。
+
+    ★ 源目录刻意叫 assets/ 而不是 models/：
+      Windows 文件名大小写不敏感，`models/` 会与源码目录 `Models/`
+      解析成**同一个目录** —— 模型文件会混进 C# 源码旁边，
+      而且 `Models/` 下已经在放 ApiModels.cs / ServerProfile.cs。
+      换成一个不会撞名的目录名，避免这种「看起来是两处、其实是一处」的坑。
+  -->
+  <ItemGroup Condition="Exists('assets\denoiser_model.onnx')">
+    <None Include="assets\denoiser_model.onnx" CopyToOutputDirectory="PreserveNewest" Link="models\denoiser_model.onnx" />
+    <None Include="assets\initial_states.npz" CopyToOutputDirectory="PreserveNewest" Link="models\initial_states.npz" />
+    <None Include="assets\meta.json" CopyToOutputDirectory="PreserveNewest" Link="models\meta.json" />
+  </ItemGroup>
+
+  <!-- 降噪正确性自检用的样本（官方参考实现的输入/输出） -->
+  <ItemGroup Condition="Exists('assets\test-noisy.wav')">
+    <None Include="assets\test-noisy.wav" CopyToOutputDirectory="PreserveNewest" Link="models\test-noisy.wav" />
+    <None Include="assets\test-reference.wav" CopyToOutputDirectory="PreserveNewest" Link="models\test-reference.wav" />
   </ItemGroup>
 
 </Project>

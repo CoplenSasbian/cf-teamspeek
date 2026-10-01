@@ -19,3 +19,25 @@ data/
 startup.log
 startup-failure.log
 error.log
+audio-selftest.log
+audio.log
+
+# ---------- 降噪模型（约 13MB，可由官方 release 再生成） ----------
+#
+# 为什么不进仓库：
+#   · 13MB 二进制放 git 里会让仓库永久膨胀，而它与代码演进无关；
+#   · 它是可再生成的产物，不是源码。
+#
+# 重新获取（详见 README「音频链路」）：
+#   从 https://github.com/wuxuedaifu/deepfilter-stream 的 release
+#   （tag: model-dfn3-512-v1）下载 denoiser_model.onnx / initial_states.npz / meta.json
+#   放进 CfTeamspeed.Desktop/assets/，构建时会自动拷到输出目录的 models/。
+#
+# 缺失时不会崩：Dfn3Model.ResolveModelDirectory() 返回 null，
+# 降噪自动降级为「语音门限」，并在设置界面明示原因。
+#
+# 注意路径深度：本文件在 desktop/ 下，而模型在 CfTeamspeed.Desktop/assets/，
+# 所以模式必须带上中间那层目录名，否则匹配不到（anchored 写法最稳）。
+CfTeamspeed.Desktop/assets/*.onnx
+CfTeamspeed.Desktop/assets/*.npz
+CfTeamspeed.Desktop/assets/test-*.wav

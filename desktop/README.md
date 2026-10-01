@@ -90,6 +90,14 @@ desktop/CfTeamspeed.Desktop/bin/x64/Debug/net10.0-windows10.0.19041.0/win-x64/Cf
 > **实测**：在完全断网的环境下，`restore` + `build` 均通过，**0 error / 0 warning**，
 > 产物为自包含 exe（282 KB）+ Windows App SDK 运行时（共 519 个文件）。
 
+> ⚠️ **构建报 `NU1301: 本地源 “…\.dotnet-home\local-feed” 不存在` 时不用慌**：
+> `.dotnet-home/` 是被 gitignore 的多 GB 离线包目录，**全新克隆下来必然没有**，
+> 而 `NuGet.config` 里 `<clear />` 掉了所有内置源，于是 restore 直接失败、
+> 整条构建链挂掉（这是本机实际踩到的第一个坑）。
+> 现在 `NuGet.config` 已加 `%NUGET_PACKAGES%` 作为兜底源，正常情况下
+> 直接 `dotnet build` 就能过；只有那台机器连全局 packages 缓存也是空的时候，
+> 才需要按下面「离线包清单」重建 local-feed。
+
 ### 部署形态：自包含 + 非打包
 
 ```
@@ -393,6 +401,183 @@ WebView2 起不来时（缺运行时 / 被安全策略拦截），窗口**不会
 
 ---
 
+## 音频链路（RTC 语音）
+
+### 技术选型
+
+| 用途 | 选型 | 理由 |
+|---|---|---|
+| WebRTC | **SIPSorcery 10.0.16** | 纯 C#、无原生依赖，契合「自包含 + 非打包」；活跃维护 |
+| 设备 I/O | **SIPSorceryMedia.Windows**（NAudio 后端） | 与项目 TFM 精确匹配（`net10.0-windows10.0.17763`） |
+| Opus | Concentus（SIPSorcery 内置） | 无需额外依赖 |
+| 降噪 | **DeepFilterNet3**（ONNX Runtime，CPU） | 32ms 延迟、单核 7 倍实时，实测与官方参考一致 |
+
+淘汰的选项（避免重复调研）：
+`Microsoft.WinRTC.libwebrtc.win32`（2021 年停更、beta、仅 UWP、154MB）、
+`Microsoft.MixedReality.WebRTC`（已进维护状态）。
+
+### 降噪模型的获取（不进仓库）
+
+模型约 13MB，被 `.gitignore` 忽略。全新克隆后按需下载，放进
+`CfTeamspeed.Desktop/assets/`（构建时自动拷到输出目录的 `models/`）：
+
+| 文件 | 说明 |
+|---|---|
+| `denoiser_model.onnx` | 推理图（sha256 `b758c49d…`） |
+| `initial_states.npz` | **非零**初始状态（sha256 `11655037…`） |
+| `meta.json` | 契约元数据（含输入输出名与校验和） |
+
+```powershell
+$base = "https://github.com/wuxuedaifu/deepfilter-stream/releases/download/model-dfn3-512-v1"
+$dst  = "desktop/CfTeamspeed.Desktop/assets"
+New-Item -ItemType Directory -Force $dst | Out-Null
+foreach ($f in "denoiser_model.onnx","initial_states.npz","meta.json") {
+  Invoke-WebRequest "$base/$f" -OutFile "$dst/$f"
+}
+```
+
+> **缺失时不会崩**：`Dfn3Model.ResolveModelDirectory()` 返回 null，
+> 降噪自动降级为「语音门限」，设置界面会明确写出原因 ——
+> 绝不表现成「降噪没效果」让用户去猜。
+
+> ⚠️ 源目录叫 `assets/` 而不是 `models/`：Windows 文件名**大小写不敏感**，
+> `models/` 会与源码目录 `Models/`（存放 `ApiModels.cs` 等）解析成同一个目录，
+> 模型二进制会混进 C# 源码旁边。换名是为了避免这种「看着是两处、其实是一处」的坑。
+
+### 数据流
+
+```
+采集：麦克风 → 16bit PCM → 48kHz 单声道 → 512 样点/帧 → 降噪 → 重打包成 960 样点 → Opus → RTP → SFU
+播放：SFU → RTP → Opus 解码 → 按 uid 分路环形缓冲 → 混音（每用户音量/静音）→ 扬声器
+```
+
+### 目录
+
+```
+Services/Audio/
+├── AudioDevices.cs          # 设备枚举（id = 序号+名称，防插拔漂移）
+├── MicrophoneCapture.cs     # 采集 + 降噪 + 两级帧长重打包 + Opus 编码
+├── AudioMixerPlayback.cs    # 单输出设备 + 多路音源混音（不是每用户一个 WaveOut）
+├── RtcAudioSession.cs       # SFU 发布/订阅（SDP 串行队列）
+├── Denoiser.cs              # 降噪三档 + 自动降级
+└── Dsp/Dfn3Model.cs         # ONNX 会话（13 进 13 出契约 + 初值加载）
+```
+
+### 排查记录（都是实测踩到的）
+
+#### 0. 「进房报连接失败」——接收侧没声明轨道 + 编解码声道数不匹配
+
+这是最花时间的一个，**发布链路全绿但一进真实房间就失败**。
+
+**症状**：`[状态] 发布连接失败`，日志里是
+`SFU PUT /sessions/{id}/renegotiate failed`，没有任何有用信息。
+
+**定位过程**（值得照抄）：服务端其实把 Cloudflare 的原话放在信封的
+`detail` 字段里，但 `ApiException` 没透传它，所以只看到一句笼统的话。
+加上 `Detail` 之后直接看到真因：
+
+```
+invalid_session_description: SDP contains no ice-ufrag
+  → 修完后又变成 →
+invalid_session_description: The subscriber's SDP is missing the published track's codec
+```
+
+**根因有两个，都在接收侧**：
+
+1. **接收会话必须先声明一条 recvonly 音轨。**
+   不声明的话 `setRemoteDescription(SFU 的 offer)` 返回 `NoMatchingMediaType`，
+   生成的 answer 是个 **56 字节的空壳**（没有任何 media section、没有 ice-ufrag）。
+   浏览器不需要这步（它按 offer 自动建 transceiver），**SIPSorcery 不会自动建**。
+
+2. **声道数必须与 offer 一致。** SFU 的 offer 写的是
+   `a=rtpmap:111 opus/48000/2`（**2 声道**），而实际采集是单声道。
+   SIPSorcery 按格式**精确匹配**，声明 1 就直接 `AudioIncompatible`。
+   声明成 2 之后 `applied=OK`；发出去的仍是单声道 PCM，听感不变。
+
+**修复后**：answer 从 56 → 768 字节，`hasUfrag=True`，renegotiate 成功。
+
+> 排查这类问题的关键：**加 `AudioDiag` 把 offer 的 m-line/rtpmap 和
+> answer 的长度、`hasUfrag` 记下来**。只靠异常信息永远猜不到是声道数的问题。
+> 日志里那条 `a=rtpmap:111 opus/48000/2` 是整件事的转折点。
+
+#### 1. Opus 只接受合法帧长，512 会被拒
+
+**症状**：采集正常出帧（750 帧/8 秒），但**一帧都没编码出去**，且无任何报错。
+
+**原因**：降噪要求 512 样点/帧，而 Opus 只接受 960（20ms）/1920 等合法帧长。
+实测 `EncodeAudio(512)` 抛 `OpusException: OPUS_BAD_ARG`，`960` 正常。
+
+**修复**：中间加重打包缓冲，攒满 960 才编一包。
+另外把编码异常记到 `LastEncodeError` —— 之前静默 catch 掉，
+导致「采集有帧但发不出去」完全无法诊断。
+
+#### 2. DeepFilterNet3 的帧对齐协议不能省
+
+**症状**：模型能加载、能推理，但输出与官方参考完全对不上（相关系数 0.26）。
+
+**原因**：该模型有固有的算法延迟。官方参考实现的做法是：
+1) 尾部补零到「帧长整数倍 + fft 长度」（fft = 2×frame）；
+2) 全部帧跑完后丢掉开头 `d = fft - frame` 个样点。
+
+**修复**：离线比对按上述协议对齐后，**NMSE 4.5e-8 / r = 1.000000**。
+实时流里没有「跑完」这一刻，改为**启动时先喂一帧静音**预热，
+把这个延迟提前吃进去。
+
+#### 3. 初始状态不是全零
+
+`initial_states.npz` 里的滚动缓冲有非零初值，用全零初始化会让前若干帧出现可听杂音。
+`.npy` 是 zip 里的简单结构，本仓库手工解析头部读取，不引入 Python 或数组库。
+
+#### 4. 订阅要用 publisherSessionId，不是 uid
+
+SFU 的 `subscribe-batch` 要的是发布者在**其发布会话**上的 session id。
+传 uid 会找不到发布者，表现为「订阅返回空 / 一直听不到人」。
+权威来源是 `GET /api/rooms/{id}/tracks`（带 uid + sessionId + trackName），
+**不是**房间成员列表（那里没有 sessionId）。
+
+#### 5. 每用户一个 WaveOut 是错的
+
+多路远端音频应合并到**一个**输出设备再混音：
+每个 WaveOut 是独立音频流，各自缓冲不同步（听起来像回声），
+系统音量里还会冒出 N 个应用条目。混音时用 `tanh` 软限幅，
+避免多人同时说话硬截断产生爆音。
+
+### 自检入口
+
+```powershell
+# 设备 + 采集 + 三档降噪 + 扬声器 + 热切换
+CfTeamspeed.Desktop.exe --audio-selftest
+
+# 降噪正确性（与官方参考逐样点比对）
+CfTeamspeed.Desktop.exe --denoise-selftest
+
+# SFU 完整链路：Turnstile → 登录 → 建房间 → 发布（SDP 协商 + 编码发流）
+#                → 订阅（offer/answer/renegotiate）
+CfTeamspeed.Desktop.exe --rtc-selftest https://ts.example.com <key> <nickname>
+
+# 想验证「订阅别人的音频」时，额外指定一个真人在线的房间：
+CfTeamspeed.Desktop.exe --rtc-selftest <url> <key> <nick> --room <roomId>
+```
+
+三者退出码 0 = 通过。
+
+> **`--rtc-selftest` 为什么必须包含订阅这一步**：
+> 最初只测了发布，结果发布全绿、真实使用却报「连接失败」——
+> 出问题的正是订阅侧的 SDP 协商（见上方排查记录 0）。
+> 单人房间里没有别人，自检会退化为**自订阅**来走通
+> `subscribe-batch → offer → answer → renegotiate` 这条路径；
+> 要完整的双人验证就用 `--room` 指到有人发音频的房间。
+
+日志位置（数据目录下）：
+
+| 文件 | 内容 |
+|---|---|
+| `audio-selftest.log` | 设备/采集/降噪自检结果 |
+| `audio.log` | RTC 协商诊断（offer 的 m-line/rtpmap、answer 长度、`hasUfrag`） |
+| `startup.log` / `error.log` | 启动与异常 |
+
+---
+
 ## 目录结构
 
 ```
@@ -416,7 +601,17 @@ desktop/
     │   ├── AppPaths.cs                # 数据目录解析 + 原子写
     │   ├── AppSettings.cs             # 本地偏好（跨服务器通用）
     │   ├── ServerSession.cs           # ★ 单台服务器的会话（心跳/轮询/续期）
-    │   └── ServerManager.cs           # ★ 多服务器总控（增删切换 + UI 线程事件）
+    │   ├── ServerManager.cs           # ★ 多服务器总控（增删切换 + UI 线程事件）
+    │   └── Audio/                     # ★★ RTC 语音链路（见上方「音频链路」）
+    │       ├── AudioDevices.cs        # 设备枚举（id = 序号+名称）
+    │       ├── MicrophoneCapture.cs   # 采集 + 降噪 + 帧长重打包 + Opus 编码
+    │       ├── AudioMixerPlayback.cs  # 单设备多路混音
+    │       ├── RtcAudioSession.cs     # SFU 发布/订阅 + SDP 串行队列
+    │       ├── Denoiser.cs            # 降噪三档 + 自动降级
+    │       └── Dsp/Dfn3Model.cs       # DeepFilterNet3 ONNX 推理
+    ├── AudioSelfTest.cs               # --audio-selftest
+    ├── DenoiseSelfTest.cs             # --denoise-selftest
+    ├── RtcSelfTest.cs                 # --rtc-selftest
     ├── Themes/
     │   ├── Colors.xaml                # 色板（深浅色 + 高对比）
     │   ├── Brushes.xaml               # 由颜色派生的画刷
@@ -446,21 +641,33 @@ desktop/
   按需弹出 WebView2 承载的 Turnstile，拿到 token 自动继续登录；
   `--turnstile-selftest` **实测已跑通拿 token**
 - ✅ Turnstile 失败时不关窗，保留原因与「重试」按钮；按 HRESULT 给不同指引
+- ✅ **音频链路（RTC 语音）**：麦克风采集 → 降噪 → Opus 编码 → SFU 发布；
+  远端 RTP → Opus 解码 → 多路混音 → 扬声器。`--rtc-selftest` **实测已跑通**
+  （对真实服务器完成 SDP 协商、`发布已连接`、8 秒发出 396 个 Opus 包）
+- ✅ **实时降噪**：DeepFilterNet3（ONNX，CPU）三档可切换；
+  与官方参考实现逐样点比对 **NMSE 4.5e-8 / 相关系数 1.000000**
+- ✅ **设置可切换**：降噪档位、麦克风、扬声器，进房时生效；模型缺失自动降级并明示原因
 
 ### 尚未实现（下一步）
 
-- ⬜ **音频链路**：`getUserMedia` 采集、SFU 发布/订阅、`RTCRtpScriptTransform` E2EE
-  —— 目前进房只做 HTTP 登记，**还没有声音**
 - ⬜ WebSocket 事件流（`/ws-ticket` + 重连 + 指数退避）
-- ⬜ 音量控制 / 降噪 / 语音门限（网页端 `audio-mixer` / `denoise` 那一整套）
+- ⬜ E2EE（`RTCRtpScriptTransform` 在原生侧没有对应物，需要单独设计）
 - ⬜ 管理员后台（用量看板、审计、封禁）
 - ⬜ 头像图片加载（当前用昵称派生的首字底色，未拉取预设 SVG）
 - ⬜ 窗口位置记忆（当前只记尺寸）
 
-> 说明：音频是本项目**最重的一块**，网页端对应实现约 1000 行
-> （`room-controller` + `sfu-session` + `audio-mixer` + `denoise`）。
-> 本步先把「多服务器骨架 + 全部网络与状态逻辑」做扎实，
-> 音频作为独立能力叠加在其上，避免两者互相拖累。
+> **关于「人声分离」的重要说明**
+>
+> 本项目做的是**语音增强 / 降噪**（speech enhancement）：输入单声道混音，
+> 输出把非人声成分压下去。这**不是**音源分离（source separation / stem separation），
+> 即「把说话声、键盘声、音乐声各自拆成独立音轨」。
+>
+> 实时通话做不到后者，原因不是库选得不对：
+>   · 分离模型需要较长时域上下文，流式分段会产生严重边界伪影；
+>   · 算力差两三个数量级（Demucs 这类在 CPU 上实时率远低于 1）；
+>   · 业界所有「分轨」功能都是对整段音频**预先**处理，没有通话中实时做的。
+>
+> 真要分轨，正确形态是**服务端离线处理**（进房录音 → 出房后跑分离模型）。
 
 ---
 
@@ -474,7 +681,7 @@ desktop/
 | 房间列表刷新 | 8s |
 | token 续期 | 临期 5 分钟内主动 refresh；另外任何响应都可能带 `X-Refreshed-Token` |
 | WebSocket | 先 `POST /api/rooms/{id}/ws-ticket` 领**一次性**票据，再连 `wsUrl`；每次重连都要**重新领票**（指数退避）⬜ 待实现 |
-| SFU | 同一 `sessionId` 上的 SDP 变更**必须串行**，否则会随机「听不到某人」⬜ 待实现 |
+| SFU | 同一 `sessionId` 上的 SDP 变更**必须串行**，否则会随机「听不到某人」—— 已由 `SerialQueue` 实现 ✅ |
 
 ### 客户端检查清单（来自 docs/API.md 第 10.2 节）
 
@@ -483,7 +690,8 @@ desktop/
 - [x] 区分 `UNAUTHORIZED` 与 `SESSION_EXPIRED`
 - [x] 心跳 15s（断了自动重连 + 指数退避的是 WS，待实现）
 - [x] 处理心跳响应里的 `banned: true`
+- [x] 同一 session 的 SDP 变更串行化（`RtcAudioSession` 的 `SerialQueue`）
+- [x] 订阅用 `publisherSessionId`（取自 `GET /api/rooms/{id}/tracks`）
 - [ ] WebSocket 每次重连都重新领票 ⬜
 - [ ] 收到 `kicked` / `room-closed` 停止重连 ⬜
 - [ ] `tracks/close` 传 `mid` 不传 `trackName` ⬜
-- [ ] 同一 session 的 SDP 变更串行化 ⬜

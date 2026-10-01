@@ -36,6 +36,32 @@ public static class Program
             return;
         }
 
+        // 音频链路自检：设备枚举 → 采集 → 各档降噪 → 播放 → 热切换。
+        // 音频问题（没声音 / 爆音 / 降噪没生效）在 GUI 里只能靠「我听不到」去猜，
+        // 这个入口把链路拆成可测量的几段，每段单独报数。
+        // 走控制台模式（不需要 WinUI），所以放在 Application.Start 之前。
+        if (args.Any(a => string.Equals(a, "--audio-selftest", StringComparison.OrdinalIgnoreCase)))
+        {
+            Environment.ExitCode = AudioSelfTest.Run(args);
+            return;
+        }
+
+        // 降噪正确性自检：把官方测试样本过一遍本项目的 C# 链路，
+        // 与官方参考输出逐样点比对 —— 证明「推理跑完」之外，结果也确实对。
+        if (args.Any(a => string.Equals(a, "--denoise-selftest", StringComparison.OrdinalIgnoreCase)))
+        {
+            Environment.ExitCode = DenoiseSelfTest.Run(args);
+            return;
+        }
+
+        // SFU 链路自检：真的打服务端走一遍 publish 协商，
+        // 验证 SDP 往返 + Opus 编码 + RTP 发送。
+        if (args.Any(a => string.Equals(a, "--rtc-selftest", StringComparison.OrdinalIgnoreCase)))
+        {
+            Environment.ExitCode = RtcSelfTest.Run(args);
+            return;
+        }
+
         // ★ 这里刻意【不】调用 Bootstrap.TryInitialize。
         //
         // 本项目是**自包含 + 非打包**部署：Windows App SDK 的运行时 DLL 就在

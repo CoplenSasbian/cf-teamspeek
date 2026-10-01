@@ -1,6 +1,8 @@
 using CfTeamspeed.Desktop.Controls;
 using CfTeamspeed.Desktop.Models;
 using CfTeamspeed.Desktop.Services;
+using CfTeamspeed.Desktop.Services.Audio;
+using CfTeamspeed.Desktop.Services.Audio.Dsp;
 using Microsoft.UI;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
@@ -36,6 +38,15 @@ public sealed partial class MainWindow : Window
 
     private bool _muted;
     private bool _initialized;
+
+    /// <summary>当前房间的音频会话（未进房为 null）。</summary>
+    private RtcAudioSession? _audio;
+
+    /// <summary>播放器（混音器）。进程内单例 —— 一个输出设备，多路音源混音。</summary>
+    private readonly AudioMixerPlayback _playback = new();
+
+    /// <summary>是否已把混音器挂到某台输出设备上。</summary>
+    private bool _playbackStarted;
 
     public MainWindow()
     {
@@ -243,6 +254,24 @@ public sealed partial class MainWindow : Window
         var hasServers = _manager.Sessions.Count > 0;
 
         EmptyStateOverlay.Visibility = hasServers ? Visibility.Collapsed : Visibility.Visible;
+
+        // ★ 服务器栏、房间列表、成员名册都要在这里重绘。
+        //
+        // 为什么必须在这里做：后台轮询（presence 6s / 房间列表 8s）拿到新数据后
+        // 只发 ServerSession.DataChanged，而 ServerManager 把它转发成
+        // ServersChanged（见 ServerManager.EnsureSessionAsync）。
+        // 也就是说【稳态轮询的唯一出口就是这个处理函数】——
+        // 它如果只切空状态遮罩、不刷新各栏，界面就会停在首次渲染的样子：
+        // 房间列表和成员列表永远不更新。
+        //
+        // 注意 OnServerStateChanged 兜不住这件事：轮询成功路径不调用 SetState
+        // （心跳里的 SetState 有 `State != Online` 短路），所以稳态下它根本不会触发。
+        //
+        // 服务器栏不在这里管：ServerRailControl 自己订阅了 ServersChanged，
+        // 会各自 Rebuild 一次。
+        SidebarControl.Refresh();
+        MemberRailControl.Refresh();
+        RefreshActive();
 
         // 有服务器但当前这台没登录 → 引导登录。
         //
@@ -859,6 +888,7 @@ public sealed partial class MainWindow : Window
 
         try
         {
+            // 1) HTTP 登记（让服务端把我在房间里的状态广播出去）
             await session.Api.JoinRoomAsync(roomId);
             session.SetCurrentRoom(roomId);
             _joinedAt = DateTimeOffset.Now;
@@ -866,7 +896,11 @@ public sealed partial class MainWindow : Window
 
             RoomViewControl.HideNotice();
             RefreshActive();
-            Toast($"已进入房间");
+
+            // 2) 建立真实音频链路（采集 → 降噪 → Opus → SFU）
+            await StartAudioAsync(session, roomId);
+
+            Toast("已进入房间");
         }
         catch (ApiException ex)
         {
@@ -880,10 +914,148 @@ public sealed partial class MainWindow : Window
         }
     }
 
+    /// <summary>
+    /// 建立房间音频链路。
+    ///
+    /// ★ 失败【不】阻止进房 —— 进房是文字在场状态，音频是叠加能力。
+    ///   但必须把原因显示出来：否则用户看到自己在房间里却听不到声音，
+    ///   会以为是别人没说话（这是最难查的一种「故障」）。
+    /// </summary>
+    private async Task StartAudioAsync(ServerSession session, string roomId)
+    {
+        await StopAudioAsync();
+
+        try
+        {
+            var settings = await _settings.LoadAsync();
+
+            // 打开输出设备（只需一次；换设备时由设置界面重建）
+            if (!_playbackStarted)
+            {
+                var outputs = AudioDevices.Outputs();
+                var outNum = AudioDevices.Resolve(
+                    outputs,
+                    settings.OutputDeviceId,
+                    settings.OutputDeviceName) ?? (outputs.Count > 0 ? outputs[0].Number : 0);
+
+                _playback.Start(outNum);
+                _playback.MasterVolume = (float)settings.Volumes.Master;
+                _playbackStarted = true;
+            }
+
+            // 建采集（麦克风 → 降噪）
+            var denoise = new DenoiseProcessor(ToDenoiseLevel(settings.Denoise.Engine));
+
+            var inputs = AudioDevices.Inputs();
+            var inNum = AudioDevices.Resolve(
+                inputs,
+                settings.InputDeviceId,
+                settings.InputDeviceName) ?? (inputs.Count > 0 ? inputs[0].Number : 0);
+
+            var capture = new MicrophoneCapture(inNum, denoise, _ => { });
+            capture.CaptureFailed += (_, ex) => DispatcherQueue.TryEnqueue(
+                () => RoomViewControl.ShowNotice($"麦克风出错：{ex.Message}（可在设置里换设备）"));
+
+            _audio = new RtcAudioSession(session.Api, roomId, _playback);
+            _audio.StatusChanged += (_, msg) => DispatcherQueue.TryEnqueue(() => RoomViewControl.HideNotice());
+
+            // 房间里已有的人的轨道（权威来源：/api/rooms/{id}/tracks）
+            var existing = await FetchExistingTracksAsync(session, roomId);
+
+            await _audio.StartAsync(capture, existing);
+
+            if (!_muted) capture.Start();
+
+            // 降噪模型没加载成功时要明说（否则用户以为降噪开着但实际没有）
+            if (denoise.ModelUnavailableReason is { } reason)
+            {
+                RoomViewControl.ShowNotice(reason);
+            }
+        }
+        catch (Exception ex)
+        {
+            await StopAudioAsync();
+
+            var hint = ex switch
+            {
+                ApiException api => $"音频链路建立失败：{api.Message}",
+                _ => $"音频链路建立失败：{ex.Message}",
+            };
+
+            RoomViewControl.ShowNotice(hint + "（仍可在房间内停留，但听不到声音）");
+        }
+    }
+
+    /// <summary>
+    /// 从 <c>GET /api/rooms/{id}/tracks</c> 取「谁已经在发音频」。
+    ///
+    /// ★ 为什么不能从房间成员列表（<c>RoomWithMembers.Members</c>）推：
+    ///   成员里只有用户信息（uid / 昵称 / 角色），**没有** publisherSessionId，
+    ///   而订阅必须用后者（见 RemoteTrackRef 的说明）。
+    ///   轨道列表才是权威来源 —— 它会带上每条轨道的 uid + sessionId + trackName。
+    ///   Web 端也是走的这个接口（roomsApi.tracks）。
+    /// </summary>
+    private async Task<IReadOnlyList<RemoteTrackRef>> FetchExistingTracksAsync(
+        ServerSession session,
+        string roomId,
+        CancellationToken ct = default)
+    {
+        try
+        {
+            var result = await session.Api.GetTracksAsync(roomId, ct);
+            var list = new List<RemoteTrackRef>();
+
+            foreach (var t in result.Tracks)
+            {
+                if (string.IsNullOrEmpty(t.SessionId)) continue;
+                if (!string.IsNullOrEmpty(session.SelfUid) && t.Uid == session.SelfUid) continue;
+
+                list.Add(new RemoteTrackRef(t.Uid, t.SessionId, t.TrackName));
+            }
+
+            return list;
+        }
+        catch (ApiException)
+        {
+            // 拿不到轨道列表不该阻断进房：先建发布链路，
+            // 订阅等轮询/成员变化事件再补。
+            return Array.Empty<RemoteTrackRef>();
+        }
+    }
+
+    /// <summary>把本地设置里的降噪档位映射到音频层枚举。</summary>
+    private static DenoiseLevel ToDenoiseLevel(DenoiseEngine engine) => engine switch
+    {
+        DenoiseEngine.Dfn3 => DenoiseLevel.Neural,
+        DenoiseEngine.Gtcrn => DenoiseLevel.Neural,
+        DenoiseEngine.Rnnoise => DenoiseLevel.Gate,
+        _ => DenoiseLevel.Off,
+    };
+
+    private async Task StopAudioAsync()
+    {
+        if (_audio is not null)
+        {
+            try
+            {
+                await _audio.DisposeAsync();
+            }
+            catch
+            {
+                // 停止路径上不该抛
+            }
+
+            _audio = null;
+        }
+    }
+
     private async Task LeaveRoomAsync()
     {
         var session = _manager.Active;
         if (session?.CurrentRoomId is not { Length: > 0 } roomId) return;
+
+        // 先停音频，再登出房间：否则会留一条没有归属的 RTP 流
+        await StopAudioAsync();
 
         try
         {
@@ -1284,6 +1456,94 @@ public sealed partial class MainWindow : Window
         panel.Children.Add(SectionLabel("允许别人邀请我"));
         panel.Children.Add(invitableToggle);
 
+        // ---------------- 音频 ----------------
+
+        panel.Children.Add(SectionLabel("降噪"));
+
+        var denoiseCombo = new ComboBox
+        {
+            Style = (Style)Application.Current.Resources["AppComboBoxStyle"],
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+        };
+        denoiseCombo.Items.Add("关闭");
+        denoiseCombo.Items.Add("语音门限（轻，不说话时静音）");
+        denoiseCombo.Items.Add("深度降噪（神经网络，推荐）");
+        denoiseCombo.SelectedIndex = settings.Denoise.Engine switch
+        {
+            DenoiseEngine.Dfn3 or DenoiseEngine.Gtcrn => 2,
+            DenoiseEngine.Rnnoise => 1,
+            _ => 0,
+        };
+
+        panel.Children.Add(denoiseCombo);
+
+        // 模型缺失时明确告知 —— 否则用户选了「深度降噪」却实际在跑门限，
+        // 只会觉得「降噪没什么效果」，根本不知道是模型没装。
+        var modelDir = Dfn3Model.ResolveModelDirectory();
+        panel.Children.Add(new TextBlock
+        {
+            Text = modelDir is null
+                ? "⚠ 未找到降噪模型（models/denoiser_model.onnx）。选择「深度降噪」会自动降级为语音门限。"
+                : $"降噪模型已就绪：{modelDir}",
+            FontSize = 11,
+            TextWrapping = TextWrapping.Wrap,
+            Foreground = GetBrush(modelDir is null ? "WarnBrush" : "Ink3Brush"),
+        });
+
+        panel.Children.Add(SectionLabel("麦克风"));
+
+        var inputs = AudioDevices.Inputs();
+        var inputCombo = new ComboBox
+        {
+            Style = (Style)Application.Current.Resources["AppComboBoxStyle"],
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+        };
+        if (inputs.Count == 0)
+        {
+            inputCombo.Items.Add("未找到录音设备");
+            inputCombo.IsEnabled = false;
+        }
+        else
+        {
+            foreach (var d in inputs) inputCombo.Items.Add(d.Name);
+            inputCombo.SelectedIndex = Math.Max(0, inputs
+                .Select((d, i) => (d, i))
+                .FirstOrDefault(x => x.d.Id == settings.InputDeviceId).i);
+        }
+
+        panel.Children.Add(inputCombo);
+
+        panel.Children.Add(SectionLabel("扬声器"));
+
+        var outputs = AudioDevices.Outputs();
+        var outputCombo = new ComboBox
+        {
+            Style = (Style)Application.Current.Resources["AppComboBoxStyle"],
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+        };
+        if (outputs.Count == 0)
+        {
+            outputCombo.Items.Add("未找到播放设备");
+            outputCombo.IsEnabled = false;
+        }
+        else
+        {
+            foreach (var d in outputs) outputCombo.Items.Add(d.Name);
+            outputCombo.SelectedIndex = Math.Max(0, outputs
+                .Select((d, i) => (d, i))
+                .FirstOrDefault(x => x.d.Id == settings.OutputDeviceId).i);
+        }
+
+        panel.Children.Add(outputCombo);
+
+        panel.Children.Add(new TextBlock
+        {
+            Text = "音频在进房时生效；改设备后重新进一次房间即可。",
+            FontSize = 11,
+            TextWrapping = TextWrapping.Wrap,
+            Foreground = GetBrush("Ink3Brush"),
+        });
+
         panel.Children.Add(SectionLabel("界面音效"));
         panel.Children.Add(soundToggle);
 
@@ -1321,7 +1581,39 @@ public sealed partial class MainWindow : Window
             s.SoundEffects = soundToggle.IsOn;
             s.PresenceStatus = newStatus;
             s.Invitable = invitableToggle.IsOn;
+
+            // 降噪档位（热切换：下一次进房生效；
+            // 已在房间里时由下面 ApplyAudioSettingsLiveAsync 立即应用）
+            s.Denoise.Engine = denoiseCombo.SelectedIndex switch
+            {
+                2 => DenoiseEngine.Dfn3,
+                1 => DenoiseEngine.Rnnoise,
+                _ => DenoiseEngine.Off,
+            };
+
+            // 设备选择：id 与名字一起存（理由见 AppSettings.InputDeviceName）
+            if (inputs.Count > 0 && inputCombo.SelectedIndex >= 0)
+            {
+                var dev = inputs[inputCombo.SelectedIndex];
+                s.InputDeviceId = dev.Id;
+                s.InputDeviceName = dev.Name;
+            }
+
+            if (outputs.Count > 0 && outputCombo.SelectedIndex >= 0)
+            {
+                var dev = outputs[outputCombo.SelectedIndex];
+                s.OutputDeviceId = dev.Id;
+                s.OutputDeviceName = dev.Name;
+            }
         });
+
+        // 正在房间里 → 让改动立即生效，不必手动退出重进
+        if (_audio is not null && session?.CurrentRoomId is { Length: > 0 } liveRoom)
+        {
+            await StopAudioAsync();
+            await StartAudioAsync(session, liveRoom);
+            Toast("音频设置已重新应用");
+        }
 
         // 改昵称是「改资料」而不是「改本地偏好」：要同步到服务端
         var newNickname = nicknameInput.Text.Trim();

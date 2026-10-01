@@ -52,6 +52,16 @@ public sealed class ApiException : Exception
     /// <summary>WebSocket 票据失效/过期/已用：重新领一张即可。</summary>
     public bool IsBadTicket => string.Equals(Code, ErrorCodes.BadTicket, StringComparison.Ordinal);
 
+    /// <summary>
+    /// 服务端附带的原始详情（信封里的 <c>detail</c> 字段）。
+    ///
+    /// 为什么要留它：SFU 这类上游错误，服务端只把「SFU 调用失败」当 <c>error</c> 返回，
+    /// 真正有用的信息（Cloudflare 的原话，比如 "sessionDescription is required"）
+    /// 全在 <c>detail</c> 里。丢掉它就只能看到一句笼统的话，
+    /// 排查时等于什么都没说 —— 实测就是靠它才定位到 renegotiate 的真实原因。
+    /// </summary>
+    public string? Detail { get; init; }
+
     /// <summary>构造「拿不到响应」的异常（网络层）。</summary>
     public static ApiException Transport(string message, Exception? inner = null)
         => new(message, code: null, httpStatus: 0, innerException: inner);
@@ -61,9 +71,16 @@ public sealed class ApiException : Exception
         => new("服务器返回了无法解析的响应", code: null, httpStatus: status, innerException: inner);
 
     /// <summary>构造「服务端明确报错」的异常。</summary>
-    public static ApiException FromEnvelope(string? error, string? code, int status)
+    public static ApiException FromEnvelope(string? error, string? code, int status, string? detail = null)
         => new(
             string.IsNullOrWhiteSpace(error) ? $"请求失败（{status}）" : error!,
             code,
-            status);
+            status)
+        {
+            Detail = detail,
+        };
+
+    /// <summary>带详情的一句话（用于日志与自检输出）。</summary>
+    public string Describe() =>
+        string.IsNullOrWhiteSpace(Detail) ? Message : $"{Message} —— 详情：{Detail}";
 }

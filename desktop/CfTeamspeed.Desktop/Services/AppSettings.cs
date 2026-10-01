@@ -136,9 +136,23 @@ public sealed class AppSettings
     [JsonPropertyName("inputDeviceId")]
     public string? InputDeviceId { get; set; }
 
+    /// <summary>
+    /// 首选输入设备名（与 id 一起存）。
+    ///
+    /// 为什么要同时存名字：设备 id 里带的是**枚举序号**，
+    /// 插拔一个 USB 麦克风就会让后面所有设备的序号漂移，
+    /// 只按序号找会选错设备。名字用于「序号变了但设备还在」时兜底重定位。
+    /// </summary>
+    [JsonPropertyName("inputDeviceName")]
+    public string? InputDeviceName { get; set; }
+
     /// <summary>首选输出设备 id；为空表示跟随系统默认。</summary>
     [JsonPropertyName("outputDeviceId")]
     public string? OutputDeviceId { get; set; }
+
+    /// <summary>首选输出设备名（理由同 <see cref="InputDeviceName"/>）。</summary>
+    [JsonPropertyName("outputDeviceName")]
+    public string? OutputDeviceName { get; set; }
 
     // ---- 在线状态 ----
 
