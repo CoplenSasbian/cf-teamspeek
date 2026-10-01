@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  画刷层：把 Colors.xaml 里的 Color 变成可直接用的 SolidColorBrush。
+
+  为什么不让颜色和画刷放在同一个字典里？
+  因为 SolidColorBrush 在 ThemeDictionaries 里做「同名不同主题」比较容易出错
+  （主题切换时的引用解析有坑），分成两层最稳：
+    Colors.xaml  —— 只放 Color，按主题分
+    Brushes.xaml —— 只放 Brush，引用上面那些 Color，随主题自动重算
+-->
+<ResourceDictionary
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <!-- 页面底色 -->
+    <SolidColorBrush x:Key="AppBrush" Color="{ThemeResource AppColor}" />
+    <SolidColorBrush x:Key="AppMidBrush" Color="{ThemeResource AppMidColor}" />
+
+    <!-- 表面层级 -->
+    <SolidColorBrush x:Key="SurfaceBrush" Color="{ThemeResource SurfaceColor}" />
+    <SolidColorBrush x:Key="Surface2Brush" Color="{ThemeResource Surface2Color}" />
+    <SolidColorBrush x:Key="Surface3Brush" Color="{ThemeResource Surface3Color}" />
+
+    <!-- 描边 -->
+    <SolidColorBrush x:Key="LineBrush" Color="{ThemeResource LineColor}" />
+    <SolidColorBrush x:Key="LineSoftBrush" Color="{ThemeResource LineSoftColor}" />
+
+    <!-- 文字 -->
+    <SolidColorBrush x:Key="InkBrush" Color="{ThemeResource InkColor}" />
+    <SolidColorBrush x:Key="Ink2Brush" Color="{ThemeResource Ink2Color}" />
+    <SolidColorBrush x:Key="Ink3Brush" Color="{ThemeResource Ink3Color}" />
+
+    <!-- 强调 -->
+    <SolidColorBrush x:Key="AccentBrush" Color="{ThemeResource AccentColor}" />
+    <SolidColorBrush x:Key="AccentHoverBrush" Color="{ThemeResource AccentHoverColor}" />
+    <SolidColorBrush x:Key="AccentSoftBrush" Color="{ThemeResource AccentSoftColor}" />
+    <SolidColorBrush x:Key="AccentInkBrush" Color="{ThemeResource AccentInkColor}" />
+
+    <!-- 状态 -->
+    <SolidColorBrush x:Key="UpBrush" Color="{ThemeResource UpColor}" />
+    <SolidColorBrush x:Key="WarnBrush" Color="{ThemeResource WarnColor}" />
+    <SolidColorBrush x:Key="DownBrush" Color="{ThemeResource DownColor}" />
+
+    <!--
+      半透明描边：网页端大量使用 border-line/40 这类写法。
+      XAML 的 Color 不能直接算透明度，这里给出几个常用档位，
+      免得每个控件都写一堆 Opacity 属性（那会连带子元素一起变透明）。
+    -->
+    <SolidColorBrush x:Key="LineFaintBrush" Color="{ThemeResource LineColor}" Opacity="0.45" />
+    <SolidColorBrush x:Key="LineStrongBrush" Color="{ThemeResource LineColor}" Opacity="0.8" />
+
+    <!-- 服务器栏专用的半透明表面（网页端 bg-surface/55 那一档） -->
+    <SolidColorBrush x:Key="SurfaceRailBrush" Color="{ThemeResource SurfaceColor}" Opacity="0.55" />
+    <SolidColorBrush x:Key="SurfaceSidebarBrush" Color="{ThemeResource SurfaceColor}" Opacity="0.55" />
+    <SolidColorBrush x:Key="SurfacePanelBrush" Color="{ThemeResource SurfaceColor}" Opacity="0.72" />
+
+    <!-- ============================================================
+         渐变与光晕：对应网页端 .app-backdrop
+         ============================================================ -->
+    <LinearGradientBrush x:Key="AppBackdropBrush" StartPoint="0.5,0" EndPoint="0.5,1">
+        <GradientStop Color="{ThemeResource AppColor}" Offset="0" />
+        <GradientStop Color="{ThemeResource AppMidColor}" Offset="1" />
+    </LinearGradientBrush>
+
+</ResourceDictionary>

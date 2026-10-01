@@ -99,7 +99,7 @@ security:
   # 会话有效期（小时）
   session_ttl_hours: 12
 
-  # 管理员后台是否强制 Turnstile 人机验证
+  # 登录是否强制 Turnstile 人机验证（访客与管理员一视同仁）
   require_turnstile: true
 
   # 昵称规则

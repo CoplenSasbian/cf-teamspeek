@@ -1,0 +1,21 @@
+# 桌面端专属忽略规则。
+#
+# 注意：仓库根目录的 .gitignore 已经覆盖了这里的大部分条目
+# （desktop/**/bin、desktop/**/obj、.dotnet-home/、*.log）。
+# 保留本文件是为了让 desktop/ 单独拿出来用（或将来拆成独立仓库）时依然干净。
+
+# ---------- .NET / WinUI 构建产物 ----------
+bin/
+obj/
+*.user
+
+# ---------- 本地数据（含登录 token，绝不能进仓库） ----------
+data/
+
+# ---------- 离线构建用的本地包缓存（数 GB，见 README 重建说明） ----------
+.dotnet-home/
+
+# ---------- 启动诊断日志 ----------
+startup.log
+startup-failure.log
+error.log

@@ -24,7 +24,19 @@ export interface ClientConfig {
   e2eeEnabled: boolean;
   e2eeFallback: boolean;
   audioBitrateKbps: number;
-  /** 管理员登录是否需要人机验证（原生客户端可据此决定是否内嵌 WebView） */
+  /**
+   * 登录是否需要人机验证。
+   *
+   * **访客与管理员都需要**（服务端一视同仁）。客户端应据此决定是否渲染
+   * Turnstile；原生客户端在需要时必须内嵌浏览器引擎才能登录。
+   * 部署方可用 `LOGIN_TURNSTILE=false` 整体关闭。
+   */
+  loginTurnstile: boolean;
+  /**
+   * @deprecated 用 `loginTurnstile`。
+   * 保留字段仅为兼容尚未升级的旧客户端（它们的类型里只有这个字段）。
+   * 注意语义已变：现在**不再**表示「只有管理员需要」。
+   */
   adminLoginTurnstile: boolean;
   /** 服务端是否开启了跨域白名单（第三方网页客户端排查用） */
   crossOrigin: boolean;

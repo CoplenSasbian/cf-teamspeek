@@ -37,9 +37,14 @@ export interface Env {
    */
   ALLOWED_ORIGINS?: string;
   /**
-   * 管理员登录是否强制人机验证。默认 `true`。
-   * 设为 `false` 可让纯原生客户端（无法渲染 Turnstile widget）直接登录 ——
-   * 代价是后台登录只剩「key + 失败锁定」这一层防护。
+   * 登录是否需要人机验证。**默认开启，且对所有身份生效**（访客 + 管理员）。
+   * 设为 `false` 可整体关闭 —— 关掉后登录只剩「key + 失败锁定」这一层防护。
+   */
+  LOGIN_TURNSTILE?: string;
+  /**
+   * @deprecated 改用 `LOGIN_TURNSTILE`。
+   * 仍然兼容（设 false 等同于 LOGIN_TURNSTILE=false），
+   * 保留是为了让已在跑的部署升级后行为不变。
    */
   ADMIN_LOGIN_TURNSTILE?: string;
 

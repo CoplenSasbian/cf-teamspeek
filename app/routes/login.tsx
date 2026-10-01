@@ -40,6 +40,8 @@ export default function Login() {
   const [turnstileSiteKey, setTurnstileSiteKey] = useState('');
   const [turnstileToken, setTurnstileToken] = useState<string | null>(null);
   const [turnstileReset, setTurnstileReset] = useState(0);
+  /** 服务端是否要求人机验证（默认 true；拉配置失败时保守地按「需要」处理） */
+  const [loginTurnstile, setLoginTurnstile] = useState(true);
   /** 本次登录来自邀请链接（顶部显示提示） */
   const [fromInvite, setFromInvite] = useState(false);
 
@@ -62,6 +64,10 @@ export default function Login() {
       try {
         const cfg = await authApi.config();
         setTurnstileSiteKey(cfg.turnstileSiteKey || '');
+        // 新字段优先；老服务端没有它就回退到 adminLoginTurnstile
+        // （老语义下它只表示「管理员需要」，但我们宁可多显示一次验证，
+        //   也不要漏掉 —— 漏掉的后果是登录直接 403）
+        setLoginTurnstile(cfg.loginTurnstile ?? cfg.adminLoginTurnstile ?? true);
       } catch {
         /* 配置拉取失败不阻塞登录 */
       }
@@ -86,6 +92,12 @@ export default function Login() {
     const url = baseUrl.trim() || resolveBaseUrl();
     if (!key.trim()) return setError('请填写 key');
     if (!nickname.trim()) return setError('请填写昵称');
+
+    // 需要验证但还没拿到 token：提前拦下来给出明确指引，
+    // 而不是等服务端回一个 403（那时用户只看到「验证未通过」却不知该做什么）
+    if (loginTurnstile && turnstileSiteKey && !turnstileToken) {
+      return setError('请先完成下方的人机验证');
+    }
 
     setBusy(true);
     try {
@@ -222,8 +234,9 @@ export default function Login() {
             <AvatarPicker value={avatarId} onChange={setAvatarId} presets={PRESET_AVATARS} />
           </Field>
 
-          {turnstileSiteKey && (
-            <Field label="人机验证" hint="使用管理员 key 时必填">
+          {/* 人机验证：访客与管理员都需要（服务端一视同仁） */}
+          {turnstileSiteKey && loginTurnstile && (
+            <Field label="人机验证" hint="必填，用于确认你是真人">
               <Turnstile
                 siteKey={turnstileSiteKey}
                 onToken={setTurnstileToken}

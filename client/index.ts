@@ -194,9 +194,13 @@ export class VoiceRoomClient {
   /**
    * 登录。
    *
-   * `turnstileToken` 只在「管理员登录」时需要，且要求服务端
-   * `ADMIN_LOGIN_TURNSTILE` 为 true（可由 `config().adminLoginTurnstile` 判断）。
-   * 无法渲染 Turnstile 的客户端只能由部署方关闭该开关，或用 WebView 承载。
+   * **所有身份都需要人机验证**（访客与管理员一视同仁）。
+   * 是否需要由 `config().loginTurnstile` 决定（默认 true）：
+   *
+   * - `true`：必须先渲染 Cloudflare Turnstile 拿到 token 再调用本方法。
+   *   无法渲染的客户端（纯 CLI、无浏览器引擎）只能由部署方设
+   *   `LOGIN_TURNSTILE=false` 整体关闭，否则无法登录。
+   * - `false`：`turnstileToken` 可省略。
    */
   async login(input: {
     key: string;

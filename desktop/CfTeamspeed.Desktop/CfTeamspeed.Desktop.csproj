@@ -1,0 +1,92 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
+    <RootNamespace>CfTeamspeed.Desktop</RootNamespace>
+    <AssemblyName>CfTeamspeed.Desktop</AssemblyName>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <!--
+      平台必须显式指定：WindowsAppSDKSelfContained=true 时，
+      Windows App SDK 的 targets 会校验平台，AnyCPU 会直接报
+      「requires a supported Windows architecture」。
+      这里只列 x64 —— arm64 的运行时包没有随仓库附带（见 NuGet.config 的离线说明）。
+    -->
+    <Platforms>x64</Platforms>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <UseWinUI>true</UseWinUI>
+
+    <!-- 非打包（unpackaged）自包含部署：不依赖 MSIX，也不需要用户预装 Windows App SDK 运行时 -->
+    <WindowsPackageType>None</WindowsPackageType>
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <SelfContained>true</SelfContained>
+    <EnableMsixTooling>false</EnableMsixTooling>
+
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+
+    <!--
+      自己写入口点（Program.cs）。
+      自包含非打包部署必须在最早时刻初始化 WinRT / Windows App SDK，
+      XAML 自动生成的 Main 不满足这个要求，会导致进程静默退出。
+    -->
+    <DefineConstants>$(DefineConstants);DISABLE_XAML_GENERATED_MAIN</DefineConstants>
+
+    <!--
+      ⚠️ 不要关闭 AppxGeneratePriEnabled。
+
+      曾经因为 MakePri.exe 报 0x80070005 而试着关掉它（以为「非打包用不到 PRI」），
+      结果：**能编译通过，但应用启动后立刻退出、窗口根本不出现**。
+      说明这个 .pri 是 XAML 运行时真正要用的，不是打包才需要。
+
+      正确做法是修 MakePri 的问题（见下面的 MakePriExeFullPath）。
+    -->
+
+    <!--
+      ★ 强制使用 Windows SDK 自带的 MakePri.exe，而不是 NuGet 包
+        (Microsoft.Windows.SDK.BuildTools.MSIX) 里的那个。
+
+      实测：
+        · NuGet 包里的 makepri.exe（10.0.26100.4654）
+          → 执行 new/dump 一律以 0x80070005（拒绝访问）失败，
+            且**不给任何诊断信息**，只有 MSB6006 一句。
+            连「索引一个只含 a.txt 的目录」都失败；
+            但同目录下的 createconfig 却能正常写文件 —— 说明二进制本身没坏，
+            是索引这一步被环境挡住了（原因未查明）。
+        · Windows Kits 自带的 makepri.exe
+          → 同样输入下 exit=0，正常产出 .pri
+            （实测本项目：232 named resources / 17990 candidates）。
+
+      两者版本号相同，行为却不同，所以这里显式指到 SDK 的那个。
+      若你的机器没有这个路径，删掉本属性即可回退到默认行为。
+    -->
+    <MakePriExeFullPath Condition="Exists('C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\makepri.exe')">C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\makepri.exe</MakePriExeFullPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.8.260101001" />
+
+    <!--
+      WebView2 用于渲染 Cloudflare Turnstile 的人机验证小组件
+      （Turnstile 的 token 只能由真实浏览器引擎执行 Cloudflare 的 JS 得到，
+       官方没有 REST 接口也没有原生 SDK，这是唯一实现路径）。
+
+      ★ 刻意【不】在此显式声明 Microsoft.Web.WebView2。
+        它是 Microsoft.WindowsAppSDK.WinUI 的传递依赖，本来就会进包。
+
+        显式声明过一次的后果：restore 图变化，把
+        Microsoft.Windows.SDK.BuildTools.MSIX 的 PriGen 目标激活了，
+        而该目标调用 MakePri.exe 时以 0x80070005（拒绝访问）失败 ——
+        整个构建挂掉，且错误只有一句 MSB6006，从报错完全看不出
+        跟 WebView2 有关系。移除显式引用后构建恢复正常。
+
+        要锁传递依赖版本，用 CentralPackageTransitivePinning，
+        而不是加 PackageReference。
+    -->
+  </ItemGroup>
+
+</Project>

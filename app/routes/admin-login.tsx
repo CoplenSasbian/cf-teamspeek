@@ -2,7 +2,9 @@ import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { AlertTriangle, KeyRound, Loader2, Shield } from 'lucide-react';
 
+import { Turnstile } from '~/components/Turnstile';
 import { adminApi, adminAuthApi, setAdminBaseUrl } from '~/lib/admin-api';
+import { authApi } from '~/lib/api';
 import { resolveBaseUrl } from '~/lib/settings';
 import { cn } from '~/lib/utils';
 
@@ -15,6 +17,9 @@ export function meta() {
  *
  * 与客户端登录完全隔离：不同的端点、不同的 key、不同的 JWT secret、
  * 不同的 cookie。这里不注册昵称、不挑头像 —— 后台只有一个凭据：ADMIN_KEY。
+ *
+ * 人机验证：后台权限最大，**必须验证**。Site Key 从公开的
+ * `/api/auth/config` 取（后台自己的接口都要鉴权，拿不到它）。
  */
 export default function AdminLogin() {
   const navigate = useNavigate();
@@ -24,10 +29,25 @@ export default function AdminLogin() {
   const [error, setError] = useState<string | null>(null);
   const [key, setKey] = useState('');
 
+  const [turnstileSiteKey, setTurnstileSiteKey] = useState('');
+  const [turnstileToken, setTurnstileToken] = useState<string | null>(null);
+  const [turnstileReset, setTurnstileReset] = useState(0);
+  const [loginTurnstile, setLoginTurnstile] = useState(true);
+
   useEffect(() => {
-    setAdminBaseUrl(resolveBaseUrl());
+    const base = resolveBaseUrl();
+    setAdminBaseUrl(base);
 
     void (async () => {
+      // Site Key 走公开的客户端配置接口取（后台接口都需要鉴权）
+      try {
+        const cfg = await authApi.config();
+        setTurnstileSiteKey(cfg.turnstileSiteKey || '');
+        setLoginTurnstile(cfg.loginTurnstile ?? cfg.adminLoginTurnstile ?? true);
+      } catch {
+        /* 拉不到配置不阻塞；服务端仍会拦下未验证的登录 */
+      }
+
       try {
         await adminAuthApi.me();
         navigate('/dev', { replace: true }); // 已登录直接进后台
@@ -41,14 +61,20 @@ export default function AdminLogin() {
     e.preventDefault();
     setError(null);
     if (!key.trim()) return setError('请填写管理 key');
+    if (loginTurnstile && turnstileSiteKey && !turnstileToken) {
+      return setError('请先完成下方的人机验证');
+    }
 
     setBusy(true);
     try {
-      const res = await adminAuthApi.login(key.trim());
+      const res = await adminAuthApi.login(key.trim(), turnstileToken);
       window.sessionStorage.setItem('cf-teamspeed.adminToken', res.token);
       navigate('/dev', { replace: true });
     } catch (err) {
       setError(err instanceof Error ? err.message : '登录失败');
+      // 失败后 Turnstile token 已被消费，必须重置换新的
+      setTurnstileToken(null);
+      setTurnstileReset((n) => n + 1);
     } finally {
       setBusy(false);
     }
@@ -106,6 +132,20 @@ export default function AdminLogin() {
             />
           </div>
         </label>
+
+        {turnstileSiteKey && loginTurnstile && (
+          <label className="flex flex-col gap-2">
+            <span className="flex items-baseline gap-2">
+              <span className="text-xs font-medium text-ink-2">人机验证</span>
+              <span className="text-[11px] text-ink-3">后台权限最大，必填</span>
+            </span>
+            <Turnstile
+              siteKey={turnstileSiteKey}
+              onToken={setTurnstileToken}
+              resetSignal={turnstileReset}
+            />
+          </label>
+        )}
 
         <button
           type="submit"

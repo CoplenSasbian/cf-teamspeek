@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  人机验证窗口（Cloudflare Turnstile）。
+
+  ★ 这是本项目里唯一使用 WebView2 的地方，且用途被严格限制：
+    渲染 Cloudflare 的验证小组件、把 token 交回宿主。
+
+  为什么必须这么做：Turnstile 的 token 由 Cloudflare 的 JS 在浏览器环境里
+  算出来，服务端再拿它去 siteverify 校验。官方没有 REST API、也没有原生 SDK，
+  所以除了让浏览器引擎跑那段 JS，没有别的办法。
+
+  窗口本身没有任何导航能力：只加载一张内存里的本地 HTML，
+  不显示地址栏、禁用右键菜单与开发者工具入口，拿到 token 就关。
+-->
+<Window
+    x:Class="CfTeamspeed.Desktop.Views.TurnstileWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:controls="using:Microsoft.UI.Xaml.Controls"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+
+    <Grid x:Name="RootGrid" Background="{ThemeResource AppBackdropBrush}">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <!-- 标题 -->
+        <StackPanel Grid.Row="0" Padding="20,16,20,10" Spacing="4">
+            <TextBlock Text="人机验证"
+                       FontSize="15"
+                       FontWeight="SemiBold"
+                       Foreground="{ThemeResource InkBrush}" />
+            <TextBlock x:Name="SubtitleText"
+                       FontSize="11"
+                       TextWrapping="Wrap"
+                       Foreground="{ThemeResource Ink3Brush}" />
+        </StackPanel>
+
+        <!-- WebView2 承载区 -->
+        <Border Grid.Row="1"
+                Margin="16,0,16,0"
+                MinHeight="120"
+                CornerRadius="12"
+                Background="{ThemeResource Surface2Brush}">
+            <Grid>
+                <controls:WebView2 x:Name="Web" />
+
+                <!-- 加载中遮罩 -->
+                <StackPanel x:Name="LoadingPanel"
+                            HorizontalAlignment="Center"
+                            VerticalAlignment="Center"
+                            Spacing="10">
+                    <ProgressRing IsActive="True" Width="28" Height="28" />
+                    <TextBlock Text="正在加载验证组件…"
+                               FontSize="12"
+                               Foreground="{ThemeResource Ink3Brush}" />
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <!-- 底部：状态文字 + 按钮 -->
+        <Grid Grid.Row="2" Padding="20,12,20,16" ColumnSpacing="12">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+
+            <TextBlock x:Name="StatusText"
+                       Grid.Column="0"
+                       VerticalAlignment="Center"
+                       FontSize="11"
+                       TextWrapping="Wrap"
+                       Foreground="{ThemeResource Ink3Brush}" />
+
+            <StackPanel Grid.Column="1"
+                        Orientation="Horizontal"
+                        VerticalAlignment="Center"
+                        Spacing="8">
+                <Button x:Name="RetryButton"
+                        Content="重试"
+                        Visibility="Collapsed"
+                        Style="{StaticResource PrimaryButtonStyle}" />
+                <Button x:Name="CancelButton"
+                        Content="取消"
+                        Style="{StaticResource SubtleButtonStyle}" />
+            </StackPanel>
+        </Grid>
+    </Grid>
+</Window>

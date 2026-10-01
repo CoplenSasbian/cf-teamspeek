@@ -12,6 +12,7 @@ import { ErrorCode } from '@shared/types';
 import { requireAdminSession, writeSessionCookie } from '../middleware/auth';
 import { signAdminSession, signRenewedAdminSession, verifyAdminSession } from '../lib/jwt';
 import { timingSafeEqual, sha256Hex } from '../lib/crypto';
+import { verifyTurnstile } from '../lib/turnstile';
 import { flushAuditToD1, flushUsageToD1, readUsageDaily, queryAudit, pruneAudit, deleteRoomFromD1 } from '../lib/db';
 import type { AppEnv } from '../env';
 
@@ -26,10 +27,14 @@ async function adminIpHash(c: { env: AppEnv['Bindings']; req: { header: (n: stri
 // ------------------------------------------------------------
 //  后台登录 / 登出 —— 独立于客户端会话（不同 secret + 不同 cookie）
 // ------------------------------------------------------------
-const adminLoginSchema = z.object({ key: z.string().min(1, 'key 不能为空') });
+const adminLoginSchema = z.object({
+  key: z.string().min(1, 'key 不能为空'),
+  /** Cloudflare Turnstile token；服务端要求验证时必需 */
+  turnstileToken: z.string().nullish(),
+});
 
 admin.post('/auth/login', zValidator('json', adminLoginSchema), async (c) => {
-  const { key } = c.req.valid('json');
+  const { key, turnstileToken } = c.req.valid('json');
 
   // 登录失败限流沿用 AdminDO 的计数器（按 IP 哈希，独立 scope 不影响客户端登录计数）
   const adminStub = c.env.ADMIN_DO.get(c.env.ADMIN_DO.idFromName('global'));
@@ -43,6 +48,32 @@ admin.post('/auth/login', zValidator('json', adminLoginSchema), async (c) => {
       { ok: false, error: `尝试过于频繁，请 ${Math.ceil(lock.retryAfterMs / 60000)} 分钟后再试`, code: 'RATE_LIMITED' },
       429,
     );
+  }
+
+  // --- 人机验证：后台权限最大，这一层绝不能省 ---
+  //
+  // 放在「查锁之后、比 key 之前」：
+  //   · 查锁之后 —— 被锁的 IP 不必浪费一次 Turnstile 校验；
+  //   · 比 key 之前 —— 避免把 key 比对暴露给自动化脚本刷。
+  // 与客户端登录共用同一个开关（LOGIN_TURNSTILE / 兼容 ADMIN_LOGIN_TURNSTILE）。
+  const turnstileRequired =
+    c.env.LOGIN_TURNSTILE !== 'false' && c.env.ADMIN_LOGIN_TURNSTILE !== 'false';
+
+  if (turnstileRequired) {
+    const ip = c.req.header('CF-Connecting-IP') ?? '';
+    const ts = await verifyTurnstile(c.env.TURNSTILE_SECRET_KEY, turnstileToken, ip);
+    if (!ts.success) {
+      const missing = ts.errors.includes('missing-input-response');
+      return c.json(
+        {
+          ok: false,
+          error: missing ? '请先完成人机验证' : '人机验证未通过，请重试',
+          code: ErrorCode.TURNSTILE_FAILED,
+          detail: ts.errors,
+        },
+        403,
+      );
+    }
   }
 
   if (!timingSafeEqual(key, c.env.ADMIN_KEY)) {

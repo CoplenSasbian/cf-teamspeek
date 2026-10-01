@@ -104,7 +104,8 @@
           "e2eeEnabled": { "type": "boolean" },
           "e2eeFallback": { "type": "boolean" },
           "audioBitrateKbps": { "type": "integer" },
-          "adminLoginTurnstile": { "type": "boolean", "description": "管理员登录是否强制人机验证" },
+          "loginTurnstile": { "type": "boolean", "description": "登录是否需要人机验证。访客与管理员一视同仁；客户端据此决定是否渲染 Turnstile" },
+          "adminLoginTurnstile": { "type": "boolean", "description": "【已废弃，用 loginTurnstile】兼容字段，值与之相同；注意它不再表示「只有管理员需要验证」" },
           "crossOrigin": { "type": "boolean", "description": "服务端是否配置了跨域白名单" }
         }
       },
@@ -263,7 +264,7 @@
       "post": {
         "tags": ["auth"],
         "summary": "用 key + 昵称换会话 token",
-        "description": "昵称全局唯一，已被占用返回 `NICKNAME_TAKEN`。管理员 key 登录需要 `turnstileToken`（见 `config.adminLoginTurnstile`）。",
+        "description": "昵称全局唯一，已被占用返回 `NICKNAME_TAKEN`。**所有登录（访客与管理员）都需要 `turnstileToken`**（见 `config.loginTurnstile`）；部署方可用 `LOGIN_TURNSTILE=false` 关闭。",
         "security": [],
         "requestBody": {
           "required": true,

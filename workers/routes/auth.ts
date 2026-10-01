@@ -52,9 +52,19 @@ auth.get('/config', (c) => {
       e2eeEnabled: c.env.E2EE_ENABLED === 'true',
       e2eeFallback: c.env.E2EE_FALLBACK === 'true',
       audioBitrateKbps: Number(c.env.AUDIO_BITRATE_KBPS),
-      // 原生客户端据此判断管理员登录是否可以脱离 WebView：
-      // true = 需要人机验证（原生端要内嵌 WebView 渲染 Turnstile）
-      adminLoginTurnstile: c.env.ADMIN_LOGIN_TURNSTILE !== 'false',
+      /**
+       * 登录是否需要人机验证。
+       *
+       * **所有身份（访客 + 管理员）都强制验证**，因此这个字段现在恒为 true ——
+       * 保留它只是为了让老客户端不必改动就能继续工作（它们会认为「需要验证」
+       * 从而正确渲染 Turnstile），而不是表示「只有管理员需要」。
+       *
+       * 只有部署方显式设置 `LOGIN_TURNSTILE=false`（老变量
+       * `ADMIN_LOGIN_TURNSTILE=false` 同样兼容）时才为 false。
+       */
+      loginTurnstile: c.env.LOGIN_TURNSTILE !== 'false' && c.env.ADMIN_LOGIN_TURNSTILE !== 'false',
+      /** @deprecated 用 loginTurnstile；保留仅为兼容旧客户端 */
+      adminLoginTurnstile: c.env.LOGIN_TURNSTILE !== 'false' && c.env.ADMIN_LOGIN_TURNSTILE !== 'false',
       // 是否配置了跨域白名单（排查第三方网页客户端问题时有用）
       crossOrigin: Boolean(c.env.ALLOWED_ORIGINS?.trim()),
     },
@@ -103,8 +113,19 @@ auth.post('/login', loginRateLimit, zValidator('json', loginSchema), async (c) =
 
   const role = isAdmin ? 'admin' : 'guest';
 
-  // --- 2. 管理员登录强制 Turnstile（可用 ADMIN_LOGIN_TURNSTILE=false 关闭） ---
-  if (role === 'admin' && c.env.ADMIN_LOGIN_TURNSTILE !== 'false') {
+  // --- 2. 人机验证：**所有身份都要过**（访客与管理员一视同仁） ---
+  //
+  // 为什么访客也要验：guest key 一旦流出去就再也收不回来，
+  // 而登录接口是最容易被脚本刷的地方（每次登录都会写审计 + 建会话）。
+  // 全员验证把这个成本压到最低，代价只是每个真人多点一次。
+  //
+  // 逃生开关：部署方可以设 LOGIN_TURNSTILE=false 整体关掉
+  // （老变量 ADMIN_LOGIN_TURNSTILE=false 也认，避免升级后行为突变）。
+  // 关掉后这一整段被跳过，登录退化为「key + 失败锁定」。
+  const turnstileRequired =
+    c.env.LOGIN_TURNSTILE !== 'false' && c.env.ADMIN_LOGIN_TURNSTILE !== 'false';
+
+  if (turnstileRequired) {
     const ts = await verifyTurnstile(c.env.TURNSTILE_SECRET_KEY, turnstileToken, ip);
     if (!ts.success) {
       const missing = ts.errors.includes('missing-input-response');

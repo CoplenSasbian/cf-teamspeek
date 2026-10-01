@@ -85,10 +85,16 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 }
 
 export const adminAuthApi = {
-  login: (key: string) =>
+  /**
+   * 后台登录。
+   *
+   * `turnstileToken` 在服务端要求人机验证时必需 —— 后台权限最大，
+   * 这一层不能省。是否需要由 `GET /api/auth/config` 的 `loginTurnstile` 决定。
+   */
+  login: (key: string, turnstileToken?: string | null) =>
     request<{ token: string; nickname: string }>('/api/admin/auth/login', {
       method: 'POST',
-      body: JSON.stringify({ key }),
+      body: JSON.stringify({ key, turnstileToken: turnstileToken ?? null }),
     }),
   me: () => request<{ nickname: string; role: string }>('/api/admin/auth/me'),
   logout: () => request<{ loggedOut: boolean }>('/api/admin/auth/logout', { method: 'POST' }),

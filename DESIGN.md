@@ -875,7 +875,7 @@ CREATE TABLE settings (
 | `ADMIN_PATH` | Var | 后台路径（默认 `/dev`） |
 | `MAX_ROOM_MEMBERS` | Var | 默认房间人数上限 |
 | `ALLOWED_ORIGINS` | Var | 跨域白名单（逗号分隔）；留空 = 只服务同源。见第 22.2 节③ |
-| `ADMIN_LOGIN_TURNSTILE` | Var | 管理员登录是否强制人机验证（默认 `true`） |
+| `LOGIN_TURNSTILE` | Var | 登录是否需要人机验证（默认 `true`，**访客与管理员都要**）；设 `false` 可整体关闭 |
 
 ### 密钥管理方式
 

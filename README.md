@@ -179,7 +179,7 @@ Worker 只负责信令与房间状态。
 | 变量 | 默认 | 作用 |
 |---|---|---|
 | `ALLOWED_ORIGINS` | 空 | 跨域白名单，逗号分隔的完整 origin。**空 = 只服务同源页面**，原生客户端不受影响。填 `*` 则放行任意来源但只能用 Bearer（浏览器不允许 `*` + Cookie） |
-| `ADMIN_LOGIN_TURNSTILE` | `true` | 管理员登录是否强制人机验证。设为 `false` 可让无法渲染 Turnstile 的原生客户端直接登录后台 |
+| `LOGIN_TURNSTILE` | `true` | 登录是否需要人机验证（**访客与管理员一视同仁**）。设为 `false` 可整体关闭 —— 代价是登录只剩「key + 失败锁定」。旧变量 `ADMIN_LOGIN_TURNSTILE` 仍兼容 |
 | `MAX_ROOM_MEMBERS` | `10` | 新房默认人数上限 |
 | `ADMIN_PATH` | `/dev` | 后台路径 |
 | `AUDIT_RETENTION_DAYS` | `90` | 审计流水保留天数 |

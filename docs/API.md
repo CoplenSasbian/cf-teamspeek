@@ -131,13 +131,24 @@ POST /api/admin/auth/login
 > ⚠️ **注意**：客户端会话里的 `role=admin` **不能**调后台接口。后台接口只认
 > `/api/admin/auth/login` 签发的 token。
 
-**Turnstile**：客户端登录（`/api/auth/login`）在**管理员 key** 下强制人机验证，
-需要提交 `turnstileToken`。是否强制由服务端 `ADMIN_LOGIN_TURNSTILE` 决定，
-可以先看 `GET /api/auth/config` 的 `adminLoginTurnstile` 字段：
+**Turnstile（人机验证）**：**所有登录都要验证** —— 客户端登录
+（`/api/auth/login`，访客与管理员一视同仁）与后台登录
+（`/api/admin/auth/login`）都必须提交 `turnstileToken`。
 
-- `true`（默认）：原生客户端需要内嵌 WebView 渲染 Turnstile widget 才能走管理员登录。
-  访客登录**不需要**。
-- `false`：部署方关掉了验证，任何客户端都能直接登录后台（只剩 key + 失败锁定）。
+是否需要由服务端 `LOGIN_TURNSTILE` 决定，可以先看
+`GET /api/auth/config` 的 `loginTurnstile` 字段：
+
+- `true`（默认）：需要验证。原生客户端必须内嵌浏览器引擎
+  （Windows 用 WebView2、Android 用 WebView、iOS 用 WKWebView）
+  渲染 Turnstile widget，否则无法登录。
+- `false`：部署方整体关掉了验证，登录只剩 key + 失败锁定。
+
+> **兼容字段**：`adminLoginTurnstile` 仍然下发且值相同，供老客户端读取。
+> 但它的语义**已经变了** —— 不再表示「只有管理员需要验证」。
+> 新客户端请用 `loginTurnstile`。
+>
+> 老变量 `ADMIN_LOGIN_TURNSTILE=false` 同样能关掉验证（避免已部署的实例
+> 升级后行为突变），但新部署请用 `LOGIN_TURNSTILE`。
 
 ---
 
@@ -280,6 +291,7 @@ Authorization: Bearer <token>
   "e2eeEnabled": true,
   "e2eeFallback": true,
   "audioBitrateKbps": 32,
+  "loginTurnstile": true,
   "adminLoginTurnstile": true,
   "crossOrigin": false
 }
@@ -295,7 +307,7 @@ Authorization: Bearer <token>
   "key": "访问 key",
   "nickname": "甲",              // 2–16 字符，中英文/数字/下划线/短横线/空格
   "avatarId": "bottts-01",       // 可选，12 个预设之一
-  "turnstileToken": null         // 仅管理员 key 需要
+  "turnstileToken": "0.xxxxx"    // 人机验证 token；loginTurnstile=true 时必需（所有身份）
 }
 ```
 
